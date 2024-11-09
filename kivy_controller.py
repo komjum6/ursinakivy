@@ -1,3 +1,6 @@
+import os
+import json
+import mmap
 import numpy as np
 from kivy.app import App
 from kivy.uix.anchorlayout import AnchorLayout
@@ -7,86 +10,155 @@ from kivy.graphics.texture import Texture as KivyTexture
 from kivy.clock import Clock
 from kivy.core.window import Window
 from PIL import Image
-import mmap
+import pygame
 import subprocess
-import json
+from pynput import mouse
+
+# Initialize Pygame only once
+pygame.init()
 
 class KivyUrsinaApp(App):
     def build(self):
-        # Initialize the AnchorLayout
         self.layout = AnchorLayout(anchor_x='center', anchor_y='top')
-
-        # Create the button and add it to the top of the layout
         button = Button(text="Kivy Button", size_hint=(0.2, 0.1), pos_hint={'center_x': 0.5, 'top': 1})
         button.bind(on_press=self.on_button_click)
         self.layout.add_widget(button, index=0)
 
-        # Define the width and height of the Ursina screen
+        # Set image display size and create a texture
         self.width, self.height = 1000, 800
-
-        # Create a Kivy texture to render Ursina's frame
         self.kivy_texture = KivyTexture.create(size=(self.width, self.height), colorfmt='rgba')
         self.image = KivyImage(texture=self.kivy_texture)
-        
-        # Set the image anchor to the center-bottom and add it to the layout
         self.image.size_hint = (1.0, 1.0)
         self.image.height = self.height
         self.layout.add_widget(self.image, index=1)
 
         # Start the Ursina process
         self.ursina_process = subprocess.Popen(['python', 'ursina_pics.py'])
-
-        # Access memory-mapped files for frame and key states
         self.frame_mm = mmap.mmap(-1, self.width * self.height * 4, tagname='UrsinaMMap')
-        self.key_mm = mmap.mmap(-1, 1024, tagname='KeyMap')
 
-        # Initialize key states for communication
-        self.key_states = {'w': False, 's': False, 'a': False, 'd': False}
-        
-        # Register key events
+        # Memory-mapped files for keyboard and mouse
+        self.key_mm = mmap.mmap(-1, 2048, tagname='KeyMap')
+        self.mouse_mm = mmap.mmap(-1, 64, tagname='MouseMap')
+
+        # Initialize key states
+        self.key_states = {chr(i): False for i in range(32, 127)}
+        self.key_states.update({
+            'space': False, 'tab': False, 'shift': False, 'ctrl': False, 'alt': False,
+            'capslock': False, 'backspace': False, 'enter': False,
+            'left': False, 'right': False, 'up': False, 'down': False,
+            'esc': False, 'del': False, 'm': False
+        })
+
+        # Toggle variable for switching renders
+        self.use_pygame_render = False
+
+        # Bind key events
         Window.bind(on_key_down=self.on_key_down)
         Window.bind(on_key_up=self.on_key_up)
+        Window.bind(mouse_pos=self.on_mouse_move)
 
-        # Schedule the update to capture Ursina's frame
+        # Use pynput to listen for scroll events
+        self.mouse_listener = mouse.Listener(on_scroll=self.on_mouse_wheel)
+        self.mouse_listener.start()
+
         Clock.schedule_interval(self.update_ursina_texture, 1 / 60)
-
         return self.layout
 
     def on_key_down(self, window, key, *args):
         key_name = Window._system_keyboard.keycode_to_string(key)
-        if key_name in self.key_states and not self.key_states[key_name]:  # Detect state change
+        special_key_map = {
+            'spacebar': 'space', 'capslock': 'capslock', 'escape': 'esc',
+            'delete': 'del', 'enter': 'enter', 'backspace': 'backspace'
+        }
+        if key_name in special_key_map:
+            key_name = special_key_map[key_name]
+        if key_name and key_name in self.key_states and not self.key_states[key_name]:
             self.key_states[key_name] = True
-            self.update_keymap()  # Write new state
+            self.update_keymap()
+
+            # Toggle between Ursina and Pygame rendering on 'm' press
+            if key_name == 'm':
+                self.use_pygame_render = not self.use_pygame_render  # Toggle state
+                print(f"'m' pressed: Toggling render mode to {'Pygame' if self.use_pygame_render else 'Ursina'}")
+                if self.use_pygame_render:
+                    self.run_pygame_render()  # Render Pygame image
 
     def on_key_up(self, window, key, *args):
         key_name = Window._system_keyboard.keycode_to_string(key)
-        if key_name in self.key_states and self.key_states[key_name]:  # Detect state change
+        special_key_map = {
+            'spacebar': 'space', 'capslock': 'capslock', 'escape': 'esc',
+            'delete': 'del', 'enter': 'enter', 'backspace': 'backspace'
+        }
+        if key_name in special_key_map:
+            key_name = special_key_map[key_name]
+        if key_name and key_name in self.key_states and self.key_states[key_name]:
             self.key_states[key_name] = False
-            self.update_keymap()  # Write new state
+            self.update_keymap()
+
+    def on_mouse_move(self, window, pos):
+        mouse_pos_data = json.dumps({'x': pos[0], 'y': pos[1], 'scroll': 0}).encode('utf-8')
+        padded_data = mouse_pos_data.ljust(64, b'\x00')
+        self.mouse_mm.seek(0)
+        self.mouse_mm.write(padded_data)
+        self.mouse_mm.flush()
+
+    def on_mouse_wheel(self, x, y, dx, dy):
+        mouse_pos_data = json.dumps({
+            'x': Window.mouse_pos[0],
+            'y': Window.mouse_pos[1],
+            'scroll_x': dx,
+            'scroll_y': dy,
+        }).encode('utf-8')
+        padded_data = mouse_pos_data.ljust(64, b'\x00')
+        self.mouse_mm.seek(0)
+        self.mouse_mm.write(padded_data)
+        self.mouse_mm.flush()
 
     def update_keymap(self):
-        # Convert key_states to JSON, then encode to 1024-byte fixed length
         key_data = json.dumps(self.key_states).encode('utf-8')
-        padded_data = key_data.ljust(1024, b'\x00')  # Pad to ensure consistent size
-
-        # Write key states to shared memory as JSON and flush
+        padded_data = key_data.ljust(2048, b'\x00')
         self.key_mm.seek(0)
         self.key_mm.write(padded_data)
         self.key_mm.flush()
-        #print(f"Updated key states: {self.key_states}")  # Debugging statement
 
     def update_ursina_texture(self, *args):
-        # Read from memory-mapped file and update texture
-        self.frame_mm.seek(0)
-        data = self.frame_mm.read(self.width * self.height * 4)
-        self.shared_array = np.flipud(np.frombuffer(data, dtype=np.uint8).reshape((self.height, self.width, 4)))
-        self.kivy_texture.blit_buffer(self.shared_array.flatten(), colorfmt='rgba', bufferfmt='ubyte')
+        if self.use_pygame_render:
+            # If using Pygame render, keep updating the texture with the Pygame image
+            self.run_pygame_render()
+        else:
+            # Regular Ursina texture update
+            self.frame_mm.seek(0)
+            data = self.frame_mm.read(self.width * self.height * 4)
+            self.shared_array = np.flipud(np.frombuffer(data, dtype=np.uint8).reshape((self.height, self.width, 4)))
+            self.kivy_texture.blit_buffer(self.shared_array.flatten(), colorfmt='rgba', bufferfmt='ubyte')
+            self.image.texture = self.kivy_texture
+            self.image.canvas.ask_update()
+
+    def run_pygame_render(self):
+        """Run Pygame rendering and display output in Kivy."""
+        # Create an off-screen surface for rendering
+        screen = pygame.Surface((self.width, self.height))
+
+        # Fill the screen and draw shapes
+        screen.fill((255, 255, 255))
+        pygame.draw.rect(screen, (0, 128, 255), pygame.Rect(30, 30, 60, 60))
+        pygame.draw.circle(screen, (255, 0, 0), (400, 300), 50)
+
+        # Convert Pygame surface to a NumPy array and to Kivy texture
+        pygame_image = pygame.surfarray.array3d(screen).transpose([1, 0, 2])
+        pil_image = Image.fromarray(pygame_image, 'RGB').convert('RGBA')
+        self.update_kivy_texture(pil_image)
+
+    def update_kivy_texture(self, pil_image):
+        """Update the Kivy texture with the image from Pygame."""
+        pil_image = pil_image.resize((self.width, self.height))
+        texture_data = pil_image.tobytes()
+        self.kivy_texture.blit_buffer(texture_data, colorfmt='rgba', bufferfmt='ubyte')
         self.image.texture = self.kivy_texture
         self.image.canvas.ask_update()
 
     def on_button_click(self, instance):
         self.update_ursina_texture()
-        # Save the current image
         img = Image.fromarray(self.shared_array, 'RGBA')
         img.save('saved_image.png')
         print("Screenshot made")
@@ -95,6 +167,8 @@ class KivyUrsinaApp(App):
         self.ursina_process.terminate()
         self.frame_mm.close()
         self.key_mm.close()
+        self.mouse_mm.close()
+        self.mouse_listener.stop()
 
 if __name__ == '__main__':
     KivyUrsinaApp().run()
