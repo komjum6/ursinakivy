@@ -1,2 +1,2 @@
 # ursinakivy
-Trying to make Ursina work with Kivy
+Trying to make Ursina & Pygame work with Kivy
