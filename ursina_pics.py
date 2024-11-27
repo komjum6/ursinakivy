@@ -4,56 +4,133 @@ import numpy as np
 from ursina import *
 from OpenGL.GL import glReadPixels, GL_RGBA, GL_UNSIGNED_BYTE
 import time
+from load_terrain import load_terrain
 
-# Initialize the Ursina application in offscreen mode
-app = Ursina(window_type='offscreen', size=(1000, 800))
-
-# Create a ground plane for the player to stand on
-ground = Entity(model='plane', scale=16, color=color.brown, position=(4, 0, 4), collider='box')
-
-# Add some extra cubes at various positions for decoration
-for pos in [(2, 0, 2), (6, 0, 6), (2, 0, 6), (6, 0, 2)]:
-    Entity(position=Vec3(*pos), model='cube', color=color.green)
-
-# Load the GLTF model
-skull_entity = Entity( 
-    model=load_model('assets/map/skull_me_no_eyes_retopo_colored.obj'), 
-    texture=load_texture('assets/map/texture273.png'), 
-    position=Vec3(4, 2, 4),
-    scale=(1,1,1)
-)
-
-# Add ambient and directional lighting
-ambient_light = AmbientLight()
-ambient_light.color = color.rgb(150, 150, 150)
-
-directional_light = DirectionalLight()
-directional_light.look_at(Vec3(-1, -1, -1))
-
-# Memory-mapped files for screenshot data, key states, and mouse position
-frame_mm = mmap.mmap(-1, 1000 * 800 * 4, access=mmap.ACCESS_WRITE, tagname='UrsinaMMap')
-key_mm = mmap.mmap(-1, 2048, access=mmap.ACCESS_READ, tagname='KeyMap')
-mouse_mm = mmap.mmap(-1, 64, access=mmap.ACCESS_READ, tagname='MouseMap')
-
-# Custom controller to handle first-person movement and camera behavior
 class CustomController(Entity):
-    def __init__(self, entity, **kwargs):
+    def __init__(self, app, **kwargs):
         super().__init__(**kwargs)
-        self.entity = entity
+        self.app = app  # Store the Ursina app instance
+        
+        # Game state
+        self.edit_mode = False
+        self.selected_entity = None
+        self.render_distance = 30
+        self.gravity_enabled = True
+        
+        # Create UI elements
+        self.position_input = InputField(default_value='0,0,0', visible=False, parent=camera.ui, position = (0,0,0))
+        self.size_input = InputField(default_value='1,1,1', visible=False, parent=camera.ui, position = (0,-0.0025,0))
+        
+        # Print window size before scaling
+        print(f"Window size: {window.size}")
+
+        # Desired dimensions 
+        desired_width = 280 
+        desired_height = 40 
+        scale_x = desired_width / window.size[0]
+        scale_y = desired_height / window.size[1]
+        
+        print(f"Calculated scale: x={scale_x}, y={scale_y}")
+
+        self.position_input.scale = (scale_x, scale_y)
+        self.size_input.scale = (scale_x, scale_y)
+
+        # Verify the scale after setting
+        print(f"Position input scale after setting: {self.position_input.scale}")
+        print(f"Size input scale after setting: {self.size_input.scale}")
+        
+        
+        # Ground position and scale
+        self.ground_position = (6, 0, 6)
+        self.ground_scale = 3
+        
+        # Initialize terrain
+        self.positions = [(-4, 0, -4), (0, 0, -3), (4, 0, -4)]
+        self.sizes = [(4, 1, 4), (4, 1, 2), (4, 1, 4)]
+        self.ground, self.ground_entities = load_terrain(
+            positions=self.positions,
+            sizes=self.sizes,
+            position=self.ground_position,
+            scale=self.ground_scale
+        )
+        
+        # Set up entity click handlers
+        for entity in self.ground_entities:
+            entity.on_click = lambda e=entity: self.on_entity_click(e)
+            entity.hovered_color = color.green
+        
+        # Add decorative cubes
+        self.decoration_positions = [(2, 0, 2), (6, 0, 6), (2, 0, 6), (6, 0, 2)]
+        for pos in self.decoration_positions:
+            Entity(position=Vec3(*pos), model='cube', color=color.green)
+        
+        # Load the skull model
+        self.skull_entity = Entity(
+            model=load_model('assets/map/skull_me_no_eyes_retopo_colored.obj'),
+            texture=load_texture('assets/map/texture273.png'),
+            position=Vec3(4, 2, 4),
+            scale=(1,1,1)
+        )
+        
+        # Set up lighting
+        self.ambient_light = AmbientLight()
+        self.ambient_light.color = color.rgb(150, 150, 150)
+        self.directional_light = DirectionalLight()
+        self.directional_light.look_at(Vec3(-1, -1, -1))
+        
+        # Memory-mapped files
+        self.frame_mm = mmap.mmap(-1, 1000 * 800 * 4, access=mmap.ACCESS_WRITE, tagname='UrsinaMMap')
+        self.key_mm = mmap.mmap(-1, 2048, access=mmap.ACCESS_READ, tagname='KeyMap')
+        self.mouse_pos_mm = mmap.mmap(-1, 64, access=mmap.ACCESS_READ, tagname='MousePosMap')
+        self.mouse_clicked_mm = mmap.mmap(-1, 84, access=mmap.ACCESS_WRITE, tagname='MouseClickedMap')
+        self.mouse_hover_mm = mmap.mmap(-1, 84, access=mmap.ACCESS_READ, tagname='MouseHoverMap')
+        
+        # Controller settings
         self.speed = 5
-        self.height = 1.1  # Adjusted to reduce the bounding box height
-        #self.entity.rotation_x = 0
-        #self.entity.rotation_y = 0
+        self.height = 1.1
         self.mouse_sensitivity = Vec2(0.2, 0.2)
         self.zoom_level = 10
         self.zoom_speed = 2.5
         self.mouse_pos = {'x': 0, 'y': 0, 'scroll_x': 0, 'scroll_y': 0}
+        self.mouse_click = {'x_click': 0, 'y_click': 0, 'clicked': 0}
+        self.mouse_hover = {'x_norm': 0, 'y_norm': 0, 'hovered': False}
         self.prev_mouse_pos = {'x': 0, 'y': 0}
-        camera.position = self.entity.position - self.entity.forward * self.zoom_level + Vec3(0, self.height + 2, 0)
+        
+        # State tracking
         self.v_pressed = False
-        self.camera_angle = 0  # Initialize the camera angle for rotation around the object
-
-        # Key states initialization
+        self.e_pressed = False
+        self.m_pressed = False
+        self.last_toggle_time_e = 0
+        self.last_toggle_time_typing = 0
+        self.toggle_delay_e = 1
+        self.toggle_delay_typing = 0.1
+        self.camera_angle = 0
+        
+        # Info text setup
+        Text.default_resolution = 800 * Text.size
+        self.info_text = Text(
+            text='',
+            position=(0, 0),
+            origin=(0, 0),
+            scale=0.1,
+            color=color.white,
+            visible=False
+        )
+        
+        # Physics settings
+        self.gravity = 0.5
+        self.grounded = False
+        self.jump_velocity = 0.2
+        self.vertical_velocity = 0
+        
+        # Set up input handlers
+        self.position_input.on_submit = self.update_entity_position
+        self.size_input.on_submit = self.update_entity_size
+        
+        # Set up camera
+        camera.position = self.skull_entity.position - self.skull_entity.forward * self.zoom_level + Vec3(0, self.height + 2, 0)
+        
+        # Initialize key states
         self.key_states = {chr(i): False for i in range(32, 127)}
         self.key_states.update({
             'tab': False, 'shift': False, 'ctrl': False, 'alt': False,
@@ -61,72 +138,96 @@ class CustomController(Entity):
             'space': False, 'left': False, 'right': False, 'up': False, 'down': False,
             'esc': False, 'del': False
         })
-
-        # Initial camera setup
-        self.update_camera_position()
-
-        # Gravity and jump settings
-        self.gravity = 0.5
-        self.grounded = False
-        self.jump_velocity = 0.2  # Initial velocity for jump
-        self.vertical_velocity = 0  # Tracks upward/downward movement
-
-        # Collision settings
-        self.traverse_target = scene
-        self.ignore_list = [self]
+        
+        # Screenshot timing
+        self.last_screenshot_time = time.time()
+        self.screenshot_interval = 1/60
+        
+        # Apply any additional kwargs
         for key, value in kwargs.items():
             setattr(self, key, value)
-
-        # Ground check
-        self.check_ground()
-
-    def update_camera_position(self):
-        """Updates the camera to follow the player from behind at a certain zoom level."""
-
-        # Check if the 'v' key is pressed
-        v = self.key_states.get('v')
         
-        # Toggle the v_pressed variable based on the key state
-        if v and not self.v_pressed:
-            self.v_pressed = True
-        elif not v and self.v_pressed:
-            self.v_pressed = False
-        
-        if self.v_pressed:
-            scroll_x = self.mouse_pos.get('scroll_x', 0)
-            
-            # Update the camera angle based on scroll_x input
-            self.camera_angle += scroll_x * 0.01  # Adjust the multiplier as needed
-            
-            # Compute the rotated camera position based on camera_angle and zoom_level
-            x_offset = self.zoom_level * math.cos(self.camera_angle)
-            z_offset = self.zoom_level * math.sin(self.camera_angle)
-            
-            # Calculate the target position for the camera
-            target_position = self.entity.position + Vec3(x_offset, self.height + 2, z_offset)
-            
-            # Determine the final camera position based on scroll_x input
-            if scroll_x != 0:
-                # Linearly interpolate the camera's position towards the target position
-                camera.position = lerp(camera.position, target_position, 0.1)  # Adjust the lerp factor as needed
-                camera.position = Vec3(camera.position.x - self.entity.forward.x / self.zoom_level, camera.position.y, camera.position.z)
-        else:
-            camera.position = self.entity.position - self.entity.forward * self.zoom_level + Vec3(0, self.height + 2, 0)
-        
-        # Update the camera's rotation to look at the entity
-        camera.rotation = Vec3(0, 0, 0)
-        camera.look_at(self.entity.position)
+    def get_pixel_position_and_size(self, ui_element):
+        """Calculate the exact pixel position of a UI element."""
+        screen_size = window.size
 
-    def check_ground(self):
-        """Ensure the player is above the ground level."""
-        ray = raycast(self.entity.world_position + Vec3(0, self.height, 0), Vec3(0, -1, 0), traverse_target=self.traverse_target, ignore=self.ignore_list)
-        if ray.hit:
-            self.entity.y = max(ray.world_point.y + self.height, self.entity.y)
-            self.grounded = ray.distance <= self.height + 0.1
-        else:
-            self.grounded = False
+        # Get the world position of the UI element
+        world_pos = ui_element.world_position
+
+        # Convert the normalized world position to pixel coordinates
+        pixel_x = int((world_pos[0] + 0.5) * screen_size[0])
+        pixel_y = int((0.5 - world_pos[1]) * screen_size[1])
+        
+        # Calculate the width and height in pixels 
+        width = int(ui_element.scale_x * screen_size[0]) 
+        height = int(ui_element.scale_y * screen_size[1])
+        
+        # Debug information
+        print(f"Element Scale: (scale_x={ui_element.scale_x}, scale_y={ui_element.scale_y})")
+        print(f"Screen Size: {screen_size}")
+        print(f"Pixel Position: ({pixel_x}, {pixel_y}), Size: ({width}, {height})")
+
+        return pixel_x, pixel_y, width, height
+        
+    def update_entity_fields(self, entity):
+        """Update input fields to display the selected entity's current position and scale."""
+        self.position_input.text = f"{round(self.positions[self.ground_entities.index(entity)][0], 1)},{round(self.positions[self.ground_entities.index(entity)][1], 1)},{round(self.positions[self.ground_entities.index(entity)][2], 1)}"
+        self.size_input.text = f"{round(self.sizes[self.ground_entities.index(entity)][0], 1)},{round(self.sizes[self.ground_entities.index(entity)][1], 1)},{round(self.sizes[self.ground_entities.index(entity)][2], 1)}"
+        self.position_input.visible = True
+        self.size_input.visible = True
+
+    def on_entity_click(self, entity):
+        """Handle entity selection for editing."""
+        if self.edit_mode:
+            self.selected_entity = entity
+            self.update_entity_fields(entity)
+
+    def update_entity_position(self, value):
+        """Update the selected entity's position from the input field."""
+        if self.selected_entity and self.edit_mode:
+            try:
+                x, y, z = map(float, value.split(','))
+                self.selected_entity.position = Vec3(x, y, z)
+                self.update_entity_fields(self.selected_entity)
+            except ValueError:
+                print("Invalid position input")
+
+    def update_entity_size(self, value):
+        """Update the selected entity's scale from the input field."""
+        if self.selected_entity and self.edit_mode:
+            try:
+                sx, sy, sz = map(float, value.split(','))
+                self.selected_entity.scale = Vec3(sx, sy, sz)
+                self.update_entity_fields(self.selected_entity)
+            except ValueError:
+                print("Invalid size input")
+
+    def toggle_edit_mode(self):
+        """Toggle edit mode and update UI visibility."""
+        self.edit_mode = not self.edit_mode
+        self.gravity_enabled = not self.edit_mode
+        self.info_text.visible = self.edit_mode
+        self.position_input.visible = self.edit_mode
+        self.size_input.visible = self.edit_mode
+        self.refresh_ground_entities()
+
+    def refresh_ground_entities(self):
+        """Refresh ground entity visibility based on render distance in edit mode."""
+        for entity in self.ground_entities:
+            entity.visible = self.edit_mode and distance(self.skull_entity.position, entity.position) < self.render_distance
+            entity.color = color.green if entity.hovered else color.white
+
+    def save_screenshot(self):
+        """Save the current frame to memory-mapped file."""
+        self.app.graphicsEngine.renderFrame()
+        pixels = np.zeros((800, 1000, 4), dtype=np.uint8)
+        glReadPixels(0, 0, 1000, 800, GL_RGBA, GL_UNSIGNED_BYTE, pixels)
+        pixels = np.flipud(pixels)
+        self.frame_mm.seek(0)
+        self.frame_mm.write(pixels.flatten())
 
     def is_valid_json(self, data):
+        """Validate and parse JSON data."""
         try:
             parsed = json.loads(data)
             if all(k in parsed for k in self.key_states.keys()):
@@ -135,91 +236,368 @@ class CustomController(Entity):
             pass
         return None
 
-    def read_mouse_pos(self):
-        mouse_mm.seek(0)
-        mouse_data = mouse_mm.read(64).decode('utf-8').strip('\x00')
-        try:
-            self.mouse_pos = json.loads(mouse_data)
-        except json.JSONDecodeError:
-            pass
-
-    def update(self):
-        key_mm.seek(0)
-        key_data = key_mm.read(2048).decode('utf-8').strip('\x00')
+    def handle_input(self):
+        """Handle keyboard input."""
+        current_time = time.time()
+        
+        # Read key states from memory map
+        self.key_mm.seek(0)
+        key_data = self.key_mm.read(2048).decode('utf-8').strip('\x00')
         new_key_states = self.is_valid_json(key_data)
+        
         if new_key_states:
             self.key_states = new_key_states
 
-        self.read_mouse_pos()
+        # Handle edit mode toggle
+        if self.key_states.get('e', False) and ((current_time - self.last_toggle_time_e) > self.toggle_delay_e):
+            self.last_toggle_time_e = current_time
+            self.toggle_edit_mode()
 
-        # Update zoom based on scroll value
-        #scroll_x = self.mouse_pos.get('scroll_x', 0)
-        scroll_y = self.mouse_pos.get('scroll_y', 0)
-        if scroll_y != 0:  # Apply zoom level changes only if there is a scroll input
-            self.zoom_level = max(5, min(15, self.zoom_level - scroll_y * (self.zoom_speed / 100)))
-            print(self.zoom_level)
-            self.update_camera_position()
-            #self.mouse_pos['scroll'] = 0  # Reset scroll after applying zoom to prevent continuous zoom
-
-        mouse_dx = self.mouse_pos['x'] - self.prev_mouse_pos['x']
-        mouse_dy = self.mouse_pos['y'] - self.prev_mouse_pos['y']
-        self.prev_mouse_pos = self.mouse_pos
-
-        # Movement controls
+        # Handle movement
         direction = Vec3(0, 0, 0)
         if self.key_states.get('w'):
-            direction += self.entity.forward
+            direction += self.skull_entity.forward
         if self.key_states.get('s'):
-            direction -= self.entity.forward
+            direction -= self.skull_entity.forward
         if self.key_states.get('a'):
-            direction -= self.entity.right
+            direction -= self.skull_entity.right
         if self.key_states.get('d'):
-            direction += self.entity.right
+            direction += self.skull_entity.right
 
-        self.entity.position += direction * self.speed * time.dt
+        self.skull_entity.position += direction * self.speed * time.dt
 
-        # Apply jump
+        # Handle jump
         if self.key_states.get('space') and self.grounded:
             self.vertical_velocity = self.jump_velocity
             self.grounded = False
 
-        # Apply gravity
-        self.vertical_velocity -= self.gravity * time.dt
-        self.entity.y += self.vertical_velocity
+        # Handle V key for camera rotation
+        v = self.key_states.get('v')
+        if v and not self.v_pressed:
+            self.v_pressed = True
+        elif not v and self.v_pressed:
+            self.v_pressed = False
 
-        # Check if we've landed
-        self.check_ground()
-        if self.grounded and self.vertical_velocity < 0:
-            self.vertical_velocity = 0  # Reset vertical velocity upon landing
+    def process_mouse(self):
+        """Handle mouse input and camera updates."""
+        # Read mouse position
+        self.mouse_pos_mm.seek(0)
+        mouse_data = self.mouse_pos_mm.read(64).decode('utf-8').strip('\x00')
+        try:
+            self.mouse_pos = json.loads(mouse_data)
+        except json.JSONDecodeError:
+            return
 
-        # Mouse look controls
-        self.entity.rotation_y += mouse_dx * self.mouse_sensitivity[0]
-        self.entity.rotation_x = clamp(self.entity.rotation_x - mouse_dy * self.mouse_sensitivity[1], -45, 45)
+        # Handle mouse movement
+        mouse_dx = self.mouse_pos['x'] - self.prev_mouse_pos['x']
+        mouse_dy = self.mouse_pos['y'] - self.prev_mouse_pos['y']
+        self.prev_mouse_pos = self.mouse_pos
+
+        # Update entity rotation based on mouse movement
+        self.skull_entity.rotation_y += mouse_dx * self.mouse_sensitivity[0]
+        self.skull_entity.rotation_x = clamp(
+            self.skull_entity.rotation_x - mouse_dy * self.mouse_sensitivity[1],
+            -45,
+            45
+        )
+        
+        # Check if the mouse is at the screen's edges 
+        if self.mouse_pos['x'] <= 0: # Left edge 
+            self.skull_entity.rotation_y -= self.mouse_sensitivity[0]*2.5
+        elif self.mouse_pos['x']/800 >= 0.99: # Right edge 
+            self.skull_entity.rotation_y += self.mouse_sensitivity[0]*2.5
+
+        # Handle zoom with scroll wheel
+        scroll_y = self.mouse_pos.get('scroll_y', 0)
+        if scroll_y != 0:
+            self.zoom_level = max(5, min(15, self.zoom_level - scroll_y * (self.zoom_speed / 100)))
+
+        # Update camera position
         self.update_camera_position()
 
-controller = CustomController(skull_entity, gravity=True)
+        # Process clicks
+        self.process_click()
+        
+        # Process hover
+        self.process_hover()
 
-last_time = time.time()
-screenshot_interval = 1 / 60
+    def process_click(self):
+        """Handle mouse click detection and entity selection."""
+        self.mouse_clicked_mm.seek(0)
+        click_data = self.mouse_clicked_mm.read(84).decode('utf-8').strip('\x00')
 
-def save_screenshot(mm, width, height):
-    app.graphicsEngine.renderFrame()
-    pixels = np.zeros((height, width, 4), dtype=np.uint8)
-    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels)
-    pixels = np.flipud(pixels)
-    mm.seek(0)
-    mm.write(pixels.flatten())
+        try:
+            click_info = json.loads(click_data)
+            if click_info.get('clicked'):
+                if self.edit_mode:
+                
+                    x_click = click_info.get('x_click', 0.5)
+                    y_click = click_info.get('y_click', 0.5)
 
+                    screen_x = (x_click * 2) - 1
+                    screen_y = (y_click * 2) - 1
+
+                    # Convert screen coordinates to window coordinates 
+                    window_x = (screen_x + 1) * window.fullscreen_size[0] / 2 
+                    window_y = (screen_y + 1) * window.fullscreen_size[1] / 2 
+                    
+                    # Deactivate both input fields initially 
+                    self.position_input.active = False 
+                    self.size_input.active = False 
+                    
+                    # Check if click is within position_input bounds 
+                    if self.is_within_bounds(self.position_input, window_x, window_y): 
+                        self.position_input.active = True 
+                        print('pos')
+                    # Check if click is within size_input bounds 
+                    elif self.is_within_bounds(self.size_input, window_x, window_y) and not self.position_input.active: 
+                        self.size_input.active = True
+                        print('size')
+                    else:
+                        ray_origin = camera.position
+                        
+                        fov_factor = math.tan(math.radians(camera.fov) * 0.5)
+                        aspect_ratio = window.aspect_ratio
+                        cursor_offset = Vec3(screen_x * aspect_ratio * fov_factor, -screen_y * fov_factor, 0)
+                        ray_direction = (
+                            camera.forward * self.zoom_level + cursor_offset +
+                            camera.right * screen_x * aspect_ratio * fov_factor +
+                            camera.up * screen_y * fov_factor
+                        ).normalized()
+
+                        if ray_origin is not None and ray_direction is not None:
+                            hit_info = raycast(
+                                origin=ray_origin,
+                                direction=ray_direction,
+                                distance=self.render_distance,
+                                traverse_target=scene
+                            )
+                            if hit_info.hit:
+                                self.selected_entity = hit_info.entity
+                                self.update_entity_fields(self.selected_entity)
+
+                self.mouse_clicked_mm.seek(0)
+                self.mouse_clicked_mm.write(
+                    json.dumps({'clicked': False}).ljust(84, '\x00').encode('utf-8')
+                )
+        except json.JSONDecodeError:
+            pass
+
+    def update_ground_entities(self): 
+        """Update the ground entities based on the input fields.""" 
+        position_values = [float(x) for x in self.position_input.text.split(',')] 
+        size_values = [float(x) for x in self.size_input.text.split(',')] 
+        
+        self.selected_entity.position = Vec3(*position_values) * self.ground_scale + self.ground_position 
+        self.selected_entity.scale = Vec3(*size_values) * self.ground_scale
+        
+        print(f'{self.selected_entity.position}')
+        print(f'{self.selected_entity.scale}')
+        
+        # Update corresponding part of the ground entity
+        for entity in self.ground_entities: 
+            if entity == self.selected_entity: 
+                entity_index = self.ground_entities.index(entity) 
+                pos = Vec3(*position_values)
+                size = Vec3(*size_values)
+                uv = self.ground.model.uvs[entity_index * 4] # Assuming uv coordinates are correctly mapped 
+                
+                # Update ground vertices for the selected entity 
+                self.ground.model.vertices[entity_index * 4] = pos 
+                self.ground.model.vertices[entity_index * 4 + 1] = pos + Vec3(size.x, 0, 0) 
+                self.ground.model.vertices[entity_index * 4 + 2] = pos + Vec3(size.x, 0, size.z) 
+                self.ground.model.vertices[entity_index * 4 + 3] = pos + Vec3(0, 0, size.z) 
+                self.ground.model.generate()
+
+
+    def is_within_bounds(self, input_field, x, y):
+        """Check if the given coordinates (x, y) are within the bounds of the input field."""
+        # Convert input field's screen position to pixel coordinates   
+        field_center_x, field_center_y, field_width, field_height = self.get_pixel_position_and_size(input_field) 
+
+        # Adjust dimensions based on actual scale in pixels
+        #field_width = 280 
+        #field_height = 40 
+
+        # Calculate bounds in absolute pixel coordinates
+        x_min = field_center_x - field_width / 2
+        x_max = field_center_x + field_width / 2
+        y_min = field_center_y - field_height / 2
+        y_max = field_center_y + field_height / 2
+
+        # Debugging boundary values
+        #print(f"Field Center: ({field_center_x:.2f}, {field_center_y:.2f})")
+        #print(f"Field Dimensions: {field_width:.2f} x {field_height:.2f}")
+        #print(f"Bounds X: {x_min:.2f} to {x_max:.2f}")
+        #print(f"Bounds Y: {y_min:.2f} to {y_max:.2f}")
+        #print(f"Click Coordinates: ({x:.2f}, {y:.2f})")
+
+        # Check if the click is within bounds
+        return x_min <= x <= x_max and y_min <= y <= y_max
+
+    def process_hover(self):
+        """Handle hover detection and effects."""
+        self.mouse_hover_mm.seek(0)
+        hover_data = self.mouse_hover_mm.read(84).decode('utf-8').strip('\x00')
+
+        try:
+            hover_info = json.loads(hover_data)
+            if hover_info.get('hovered'):
+                norm_x = hover_info.get('x_norm', 0.5)
+                norm_y = hover_info.get('y_norm', 0.5)
+
+                screen_x = (norm_x * 2.0) - 1.0
+                screen_y = 1.0 - (norm_y * 2.0)
+
+                ray_origin = camera.world_position
+
+                fov_factor = math.tan(math.radians(camera.fov) * 0.5)
+                aspect_ratio = window.aspect_ratio
+                cursor_offset = Vec3(screen_x * aspect_ratio * fov_factor, -screen_y * fov_factor, 0)
+                ray_direction = (
+                    camera.forward * self.zoom_level + cursor_offset +
+                    camera.right * screen_x * aspect_ratio * fov_factor +
+                    camera.up * screen_y * fov_factor
+                ).normalized()
+
+                hit_info = raycast(
+                    origin=ray_origin,
+                    direction=ray_direction,
+                    distance=self.render_distance,
+                    traverse_target=scene,
+                    debug=False
+                )
+
+                for entity in self.ground_entities:
+                    if hit_info.hit and hit_info.entity == entity:
+                        entity.color = color.yellow
+                        if not hasattr(entity, 'original_y'):
+                            entity.original_y = entity.y
+                        entity.y = entity.original_y + 0.1
+                    else:
+                        entity.color = color.white
+                        if hasattr(entity, 'original_y'):
+                            entity.y = entity.original_y
+            else:
+                for entity in self.ground_entities:
+                    entity.color = color.white
+                    if hasattr(entity, 'original_y'):
+                        entity.y = entity.original_y
+        except json.JSONDecodeError:
+            pass
+
+    def update_camera_position(self):
+        """Update the camera position based on player movement and view mode."""
+        if self.v_pressed:
+            scroll_x = self.mouse_pos.get('scroll_x', 0)
+            self.camera_angle += scroll_x * 0.01
+            x_offset = self.zoom_level * math.cos(self.camera_angle)
+            z_offset = self.zoom_level * math.sin(self.camera_angle)
+            target_position = self.skull_entity.position + Vec3(x_offset, self.height + 2, z_offset)
+            if scroll_x != 0:
+                camera.position = lerp(camera.position, target_position, 0.1)
+                camera.position = Vec3(
+                    camera.position.x - self.skull_entity.forward.x / self.zoom_level,
+                    camera.position.y,
+                    camera.position.z
+                )
+        else:
+            camera.position = (
+                self.skull_entity.position -
+                self.skull_entity.forward * self.zoom_level +
+                Vec3(0, self.height + 2, 0)
+            )
+        camera.rotation = Vec3(0, 0, 0)
+        camera.look_at(self.skull_entity.position)
+
+    def check_ground(self):
+        """Check if the player is grounded."""
+        ray = raycast(
+            self.skull_entity.world_position + Vec3(0, self.height, 0),
+            Vec3(0, -1, 0),
+            traverse_target=scene,
+            ignore=[self]
+        )
+        if ray.hit:
+            self.skull_entity.y = max(ray.world_point.y + self.height, self.skull_entity.y)
+            self.grounded = ray.distance <= self.height + 0.1
+        else:
+            self.grounded = False
+
+    def update_physics(self):
+        """Update physics simulation."""
+        if self.gravity_enabled:
+            self.vertical_velocity -= self.gravity * time.dt
+            self.skull_entity.y += self.vertical_velocity
+            self.check_ground()
+            if self.grounded and self.vertical_velocity < 0:
+                self.vertical_velocity = 0
+
+    def type_in_active_input(self):
+        """Type the active keys into the active input field."""
+        active_input = None
+        if self.position_input.active:
+            active_input = self.position_input
+        elif self.size_input.active:
+            active_input = self.size_input
+
+        if active_input:
+            for key, state in self.key_states.items():
+                if state:
+                    if key == 'backspace':
+                        active_input.text = active_input.text[:-1]
+                    elif key == 'enter':
+                        active_input.active = False
+                        self.positions
+                        self.sizes
+                        self.update_ground_entities() # Call to update ground entities
+                    else:
+                        active_input.text += key
+                    # Reset the key state after typing
+                    self.key_states[key] = False
+
+    def update(self):
+        """Main update loop."""
+        current_time = time.time()
+        
+        # Update info text
+        self.info_text.text = str(self.skull_entity.position)
+        
+        # Handle input
+        self.handle_input()
+        self.process_mouse()
+        
+        # Update physics
+        self.update_physics()
+        
+        # Type when an input screen is active
+        if ((current_time - self.last_toggle_time_typing) > self.toggle_delay_typing):
+            self.last_toggle_time_typing = current_time
+            self.type_in_active_input()
+        
+        # Take screenshot if needed
+        if current_time - self.last_screenshot_time >= self.screenshot_interval:
+            self.save_screenshot()
+            self.last_screenshot_time = current_time
+
+    def cleanup(self):
+        """Clean up memory-mapped files."""
+        self.frame_mm.close()
+        self.key_mm.close()
+        self.mouse_pos_mm.close()
+        self.mouse_clicked_mm.close()
+        self.mouse_hover_mm.close()
+
+# Main app setup
+app = Ursina(window_type='offscreen', size=(1000, 800))
+controller = CustomController(app)
+
+# Set up application update and run
 def update():
     controller.update()
-    global last_time
-    current_time = time.time()
-    if current_time - last_time >= screenshot_interval:
-        save_screenshot(frame_mm, 1000, 800)
-        last_time = current_time
 
-app.update = update
-app.run()
-frame_mm.close()
-key_mm.close()
-mouse_mm.close()
+controller.app.update = update
+controller.app.run()
+
+# Clean up
+controller.cleanup()
