@@ -11,18 +11,14 @@ class CustomController(Entity):
         super().__init__(**kwargs)
         self.app = app  # Store the Ursina app instance
         
+        # Very important, the scale has a will of its own so you have to carry a stick and speak softly
+        camera.ui.scale = (1, 1, 1)
+        
         # Game state
         self.edit_mode = False
         self.selected_entity = None
         self.render_distance = 30
         self.gravity_enabled = True
-        
-        # Create UI elements
-        self.position_input = InputField(default_value='0,0,0', visible=False, parent=camera.ui, position = (0,0,0))
-        self.size_input = InputField(default_value='1,1,1', visible=False, parent=camera.ui, position = (0,-0.0025,0))
-        
-        # Print window size before scaling
-        print(f"Window size: {window.size}")
 
         # Desired dimensions 
         desired_width = 280 
@@ -30,16 +26,23 @@ class CustomController(Entity):
         scale_x = desired_width / window.size[0]
         scale_y = desired_height / window.size[1]
         
-        print(f"Calculated scale: x={scale_x}, y={scale_y}")
-
-        self.position_input.scale = (scale_x, scale_y)
-        self.size_input.scale = (scale_x, scale_y)
-
-        # Verify the scale after setting
-        print(f"Position input scale after setting: {self.position_input.scale}")
-        print(f"Size input scale after setting: {self.size_input.scale}")
-        
-        
+        # Create UI elements
+        # Create input fields with the calculated scale
+        self.position_input = InputField(
+            default_value='0,0,0',
+            visible=False,
+            parent=camera.ui,
+            scale=(scale_x, scale_y),
+            position=(0, 0)
+        )
+        self.size_input = InputField(
+            default_value='1,1,1',
+            visible=False,
+            parent=camera.ui,
+            scale=(scale_x, scale_y),
+            position=(0, -0.05)
+        )
+      
         # Ground position and scale
         self.ground_position = (6, 0, 6)
         self.ground_scale = 3
@@ -110,9 +113,9 @@ class CustomController(Entity):
         Text.default_resolution = 800 * Text.size
         self.info_text = Text(
             text='',
-            position=(0, 0),
+            position=(0, 0.1),
             origin=(0, 0),
-            scale=0.1,
+            scale=1.0,
             color=color.white,
             visible=False
         )
@@ -146,6 +149,21 @@ class CustomController(Entity):
         # Apply any additional kwargs
         for key, value in kwargs.items():
             setattr(self, key, value)
+        
+    def set_ui_element_size(ui_element, desired_width, desired_height):
+        """Set the scale of the UI element based on desired pixel dimensions."""
+        screen_size = window.size
+
+        # Calculate the required scale based on desired pixel dimensions
+        scale_x = desired_width / screen_size[0]
+        scale_y = desired_height / screen_size[1]
+
+        # Set the scale
+        ui_element.scale = (scale_x, scale_y)
+
+        # Print debug information
+        print(f"Calculated scale: x={scale_x}, y={scale_y}")
+        print(f"Screen Size: {screen_size}")
         
     def get_pixel_position_and_size(self, ui_element):
         """Calculate the exact pixel position of a UI element."""
