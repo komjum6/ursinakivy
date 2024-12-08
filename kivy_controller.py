@@ -153,7 +153,7 @@ class KivyUrsinaApp(App):
         click_x, click_y = args[1], args[2]
         #print(click_x)
         #print(click_y)
-        print("click")
+        #print("click")
 
         # Normalize the position based on image dimensions (assuming top-left origin)
         norm_x = click_x / self.image.width

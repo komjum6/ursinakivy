@@ -4,7 +4,7 @@ import numpy as np
 from ursina import *
 from OpenGL.GL import glReadPixels, GL_RGBA, GL_UNSIGNED_BYTE
 import time
-from load_terrain import load_terrain
+from load_terrain import load_terrain, load_terrain_warp, apply_warp, generate_and_load_terrain
 
 class CustomController(Entity):
     def __init__(self, app, **kwargs):
@@ -18,15 +18,15 @@ class CustomController(Entity):
         self.edit_mode = False
         self.selected_entity = None
         self.render_distance = 30
-        self.gravity_enabled = True
+        self.gravity_enabled = False#True
+        self.warp = False
 
-        # Desired dimensions 
+        # Create UI elements with desired dimensions 
         desired_width = 280 
         desired_height = 40 
         scale_x = desired_width / window.size[0]
         scale_y = desired_height / window.size[1]
         
-        # Create UI elements
         # Create input fields with the calculated scale
         self.position_input = InputField(
             default_value='0,0,0',
@@ -47,16 +47,49 @@ class CustomController(Entity):
         self.ground_position = (6, 0, 6)
         self.ground_scale = 3
         
+        self.texture_paths = {
+            'Pablo_img': './assets/map/Pablo_img.jpg',
+            'pavement': './assets/map/pavement.jpg',
+            'pavement2': './assets/map/pavement2.jpg',
+            'grass': './assets/map/grass.jpg'
+        }
+        self.biome_percentages = { 
+            'grass': 0.3, 
+            'Pablo_img': 0.3, 
+            'pavement': 0.2, 
+            'pavement2': 0.2 
+        }
+        
         # Initialize terrain
         self.positions = [(-4, 0, -4), (0, 0, -3), (4, 0, -4)]
         self.sizes = [(4, 1, 4), (4, 1, 2), (4, 1, 4)]
-        self.ground, self.ground_entities = load_terrain(
-            positions=self.positions,
-            sizes=self.sizes,
-            position=self.ground_position,
-            scale=self.ground_scale
-        )
         
+        self.num_sections = len(self.texture_paths.keys())
+
+        # Parameters
+        self.num_sections_x = 30
+        self.num_sections_z = 30
+        self.tile_size = (4, 1, 4)
+        position = (0, 0, 0)
+        scale = 0.9
+        max_height = 5
+        texture_paths = self.texture_paths
+
+        self.generate_and_load_terrain = generate_and_load_terrain
+
+        # Generate and load terrain
+        self.ground, self.ground_entities, self.positions = self.generate_and_load_terrain(
+            self=self,
+            num_sections_x=self.num_sections_x,
+            num_sections_z=self.num_sections_z,
+            tile_size=self.tile_size,
+            position=position,
+            scale=scale,
+            texture_paths=texture_paths,
+            max_height=max_height,
+            biome_percentages=self.biome_percentages
+        )
+
         # Set up entity click handlers
         for entity in self.ground_entities:
             entity.on_click = lambda e=entity: self.on_entity_click(e)
@@ -162,8 +195,8 @@ class CustomController(Entity):
         ui_element.scale = (scale_x, scale_y)
 
         # Print debug information
-        print(f"Calculated scale: x={scale_x}, y={scale_y}")
-        print(f"Screen Size: {screen_size}")
+        #print(f"Calculated scale: x={scale_x}, y={scale_y}")
+        #print(f"Screen Size: {screen_size}")
         
     def get_pixel_position_and_size(self, ui_element):
         """Calculate the exact pixel position of a UI element."""
@@ -181,9 +214,9 @@ class CustomController(Entity):
         height = int(ui_element.scale_y * screen_size[1])
         
         # Debug information
-        print(f"Element Scale: (scale_x={ui_element.scale_x}, scale_y={ui_element.scale_y})")
-        print(f"Screen Size: {screen_size}")
-        print(f"Pixel Position: ({pixel_x}, {pixel_y}), Size: ({width}, {height})")
+        #print(f"Element Scale: (scale_x={ui_element.scale_x}, scale_y={ui_element.scale_y})")
+        #print(f"Screen Size: {screen_size}")
+        #print(f"Pixel Position: ({pixel_x}, {pixel_y}), Size: ({width}, {height})")
 
         return pixel_x, pixel_y, width, height
         
@@ -366,11 +399,11 @@ class CustomController(Entity):
                     # Check if click is within position_input bounds 
                     if self.is_within_bounds(self.position_input, window_x, window_y): 
                         self.position_input.active = True 
-                        print('pos')
+                        #print('pos')
                     # Check if click is within size_input bounds 
                     elif self.is_within_bounds(self.size_input, window_x, window_y) and not self.position_input.active: 
                         self.size_input.active = True
-                        print('size')
+                        #print('size')
                     else:
                         ray_origin = camera.position
                         
@@ -409,8 +442,8 @@ class CustomController(Entity):
         self.selected_entity.position = Vec3(*position_values) * self.ground_scale + self.ground_position 
         self.selected_entity.scale = Vec3(*size_values) * self.ground_scale
         
-        print(f'{self.selected_entity.position}')
-        print(f'{self.selected_entity.scale}')
+        #print(f'{self.selected_entity.position}')
+        #print(f'{self.selected_entity.scale}')
         
         # Update corresponding part of the ground entity
         for entity in self.ground_entities: 
@@ -427,6 +460,51 @@ class CustomController(Entity):
                 self.ground.model.vertices[entity_index * 4 + 3] = pos + Vec3(0, 0, size.z) 
                 self.ground.model.generate()
 
+    def update_ground_entities_warp(self):
+        """Update the ground entities based on the input fields."""
+        position_values = [float(x) for x in self.position_input.text.split(',')]
+        size_values = [float(x) for x in self.size_input.text.split(',')]
+
+        # Update selected entity's position and scale
+        self.selected_entity.position = Vec3(*position_values) * self.ground_scale + self.ground_position
+        self.selected_entity.scale = Vec3(*size_values) * self.ground_scale
+
+        # Update corresponding part of the ground entity
+        for entity in self.ground_entities:
+            if entity == self.selected_entity:
+                entity_index = self.ground_entities.index(entity)
+                pos = Vec3(*position_values)
+                size = Vec3(*size_values)
+                uv = self.ground.model.uvs[entity_index * 4]  # Assuming uv coordinates are correctly mapped
+
+                # Warp vertices based on the corresponding warp points from the list
+                warped_vertices = []
+                original_vertices = [
+                    Vec3(pos.x, pos.y, pos.z),
+                    Vec3(pos.x + size.x, pos.y, pos.z),
+                    Vec3(pos.x + size.x, pos.y, pos.z + size.z),
+                    Vec3(pos.x, pos.y, pos.z + size.z),
+                ]
+
+                warp_points = self.warp_points_list[entity_index]  # Get the warp points for this entity
+
+                for vert in original_vertices:
+                    norm_x = (vert.x - pos.x) / size.x
+                    norm_y = (vert.z - pos.z) / size.z
+                    warped_x, warped_y, warped_z = apply_warp((norm_x, norm_y), warp_points)
+                    warped_vert = Vec3(
+                        pos.x + warped_x * size.x,
+                        vert.y + warped_z * size.y,
+                        pos.z + warped_y * size.z
+                    )
+                    warped_vertices.append(warped_vert)
+
+                # Update ground vertices for the selected entity with warped vertices
+                self.ground.model.vertices[entity_index * 4] = warped_vertices[0]
+                self.ground.model.vertices[entity_index * 4 + 1] = warped_vertices[1]
+                self.ground.model.vertices[entity_index * 4 + 2] = warped_vertices[2]
+                self.ground.model.vertices[entity_index * 4 + 3] = warped_vertices[3]
+                self.ground.model.generate()
 
     def is_within_bounds(self, input_field, x, y):
         """Check if the given coordinates (x, y) are within the bounds of the input field."""
@@ -568,11 +646,33 @@ class CustomController(Entity):
                         active_input.active = False
                         self.positions
                         self.sizes
-                        self.update_ground_entities() # Call to update ground entities
+                        if self.warp:
+                            self.update_ground_entities_warp() # Call to update ground entities
+                        else:
+                            self.update_ground_entities()
                     else:
                         active_input.text += key
                     # Reset the key state after typing
                     self.key_states[key] = False
+
+    def update_minimap(self):
+        # Calculate terrain dimensions using Vec3 components
+        terrain_width = self.num_sections_x * self.tile_size[0] * self.scale.x
+        terrain_height = self.num_sections_z * self.tile_size[2] * self.scale.z
+
+        # Normalize skull position to the range [0, 1]
+        normalized_x = (self.skull_entity.position.x - self.terrain_start_x) / terrain_width
+        normalized_z = (self.skull_entity.position.z - self.terrain_start_z) / terrain_height
+
+        # Scale normalized position to minimap dimensions and center
+        minimap_width = self.minimap.scale[0] * 2
+        minimap_height = self.minimap.scale[1] * 2
+
+        dot_pos_x = (normalized_x - 0.5) * minimap_width
+        dot_pos_y = (normalized_z - 0.5) * minimap_height
+
+        # Update the dot's position on the minimap
+        self.dot.position = Vec2(dot_pos_x, dot_pos_y)
 
     def update(self):
         """Main update loop."""
@@ -587,6 +687,9 @@ class CustomController(Entity):
         
         # Update physics
         self.update_physics()
+        
+        # Update minimap
+        self.update_minimap()
         
         # Type when an input screen is active
         if ((current_time - self.last_toggle_time_typing) > self.toggle_delay_typing):
