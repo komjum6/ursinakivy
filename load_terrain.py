@@ -1,6 +1,9 @@
+# File: load_terrain.py
 import json
 import numpy as np
-from ursina import *
+from ursina import *  
+from ursina import color, Vec3, Vec2, Entity, Texture, camera
+import ursina
 from PIL import Image
 import time
 import os
@@ -11,88 +14,58 @@ from noise import pnoise2
 import matplotlib.pyplot as plt
 from io import BytesIO
 import mmap
+import math
 
-def create_texture_atlas():
-    """
-    Create a texture atlas in memory or load an existing one if it already exists.
-    Returns the generated or loaded texture atlas and texture regions for UV mapping.
-    """
-    atlas_path = './assets/map/texture_atlas.png'
-
-    # Check if the texture atlas already exists
-    if os.path.exists(atlas_path):
-        print(f"Loading existing texture atlas from {atlas_path}")
-        texture_atlas = Image.open(atlas_path).convert('RGBA')
-        atlas_height = texture_atlas.height
-        target_size = 1024  # Same as the size used during atlas creation
-        texture_regions = {
-            'room1': (0, 0 / atlas_height, 1, target_size / atlas_height),
-            'room2': (0, target_size / atlas_height, 1, 2 * target_size / atlas_height),
-            'hallway': (0, 2 * target_size / atlas_height, 1, 3 * target_size / atlas_height),
+def load_terrain_config(preset="desert_landscape"):
+    """Load terrain configuration from JSON file."""
+    try:
+        with open('terrain_config.json', 'r') as f:
+            configs = json.load(f)
+            return configs.get(preset, configs['desert_landscape'])
+    except FileNotFoundError:
+        print("Warning: terrain_config.json not found, using default values")
+        return {
+            "scale": 0.9,
+            "max_height": 4,
+            "noise_scale": 0.08,
+            "smoothing_passes": 2,
+            "biome_percentages": {
+                "Pablo_img": 0.6,
+                "pavement": 0.2,
+                "pavement2": 0.1,
+                "grass": 0.1
+            },
+            "cactus_density": 0.3,
+            "cactus_scale": 0.3
         }
-        return texture_atlas, texture_regions
 
-    # If the atlas doesn't exist, generate it
-    print(f"Creating new texture atlas at {atlas_path}")
-    textures = {
-        'room1': Image.open('./assets/map/pavement.jpg').convert('RGBA'),
-        'room2': Image.open('./assets/map/pavement2.jpg').convert('RGBA'),
-        'hallway': Image.open('./assets/map/grass.jpg').convert('RGBA')
-    }
-
-    target_size = (1024, 1024)
-    for key in textures:
-        textures[key] = textures[key].resize(target_size, Image.Resampling.LANCZOS)
-
-    atlas_width = target_size[0]
-    atlas_height = target_size[1] * len(textures)
-    texture_atlas = Image.new('RGBA', (atlas_width, atlas_height))
-
-    current_y = 0
-    texture_regions = {}
-    for key, texture in textures.items():
-        texture_atlas.paste(texture, (0, current_y))
-        texture_regions[key] = (
-            0, current_y / atlas_height,
-            1, (current_y + target_size[1]) / atlas_height
-        )
-        current_y += target_size[1]
-
-    # Save the texture atlas
-    texture_atlas.save(atlas_path)
-    return texture_atlas, texture_regions
-
-def create_texture_atlas(texture_paths):
-    """
-    Create a texture atlas dynamically from a list of textures.
-
-    Args:
-        texture_paths (dict): Dictionary of texture names and their file paths.
-
-    Returns:
-        tuple: Texture atlas and texture regions for UV mapping.
-    """
+def create_texture_atlas(texture_paths=None):
+    """Create or load a texture atlas."""
     atlas_path = './assets/map/texture_atlas.png'
+    
+    if texture_paths is None:
+        texture_paths = {
+            'Pablo_img': './assets/map/Pablo_img.jpg',
+            'pavement': './assets/map/pavement.jpg',
+            'pavement2': './assets/map/pavement2.jpg',
+            'grass': './assets/map/grass.jpg'
+        }
 
-    # Check if the texture atlas already exists
     if os.path.exists(atlas_path):
-        print(f"Loading existing texture atlas from {atlas_path}")
         texture_atlas = Image.open(atlas_path).convert('RGBA')
         atlas_height = texture_atlas.height
-        target_size = 1024  # Same as the size used during atlas creation
+        target_size = 1024
         texture_regions = {
-            key: (
-                0, i * target_size / atlas_height,
-                1, (i + 1) * target_size / atlas_height
-            )
+            key: (0, i * target_size / atlas_height,
+                 1, (i + 1) * target_size / atlas_height)
             for i, key in enumerate(texture_paths.keys())
         }
         return texture_atlas, texture_regions
 
-    # If the atlas doesn't exist, generate it
-    print(f"Creating new texture atlas at {atlas_path}")
+    # Create new atlas
     textures = {
-        name: Image.open(path).convert('RGBA') for name, path in texture_paths.items()
+        name: Image.open(path).convert('RGBA')
+        for name, path in texture_paths.items()
     }
 
     target_size = (1024, 1024)
@@ -113,24 +86,26 @@ def create_texture_atlas(texture_paths):
         )
         current_y += target_size[1]
 
-    # Save the texture atlas
     texture_atlas.save(atlas_path)
     return texture_atlas, texture_regions
 
 def load_terrain(positions, sizes, position, scale, texture_paths):
     """
-    Enhanced terrain loading function with combined hover/collision entities.
+    Basic terrain loading function with combined hover/collision entities.
+    
     Args:
         positions (list): List of (x, y, z) positions for each terrain section
         sizes (list): List of (width, height, depth) sizes for each section
         position (tuple): Global position offset for the entire terrain
         scale (float): Global scale factor for the entire terrain
+        texture_paths (dict): Dictionary mapping section names to texture file paths
+    
     Returns:
         tuple: (floor Entity, list of hover/collision entities)
     """
     # Generate the texture atlas and UV regions
-    texture_atlas, texture_regions = create_texture_atlas(texture_paths)
-    texture_atlas = Texture(texture_atlas)
+    texture_atlas_img, texture_regions = create_texture_atlas(texture_paths)
+    texture_atlas = Texture(texture_atlas_img)
 
     # Define terrain sections
     sections = [
@@ -147,7 +122,6 @@ def load_terrain(positions, sizes, position, scale, texture_paths):
         position=position
     )
 
-    # Initialize mesh data
     vertices = []
     uvs = []
     triangles = []
@@ -159,11 +133,7 @@ def load_terrain(positions, sizes, position, scale, texture_paths):
         size = section['size']
         uv = texture_regions[section['type']]
 
-        # Apply global scale to position and size
-        scaled_pos = pos * scale + Vec3(*position)
-        scaled_size = size * scale
-
-        # Create vertices for this section
+        # Create vertices
         new_vertices = [
             Vec3(pos.x, pos.y, pos.z),
             Vec3(pos.x + size.x, pos.y, pos.z),
@@ -172,39 +142,35 @@ def load_terrain(positions, sizes, position, scale, texture_paths):
         ]
         vertices.extend(new_vertices)
 
-        # Create UVs with proper mapping
         new_uvs = [
-            Vec2(uv[0], uv[1]),  # Bottom left
-            Vec2(uv[2], uv[1]),  # Bottom right
-            Vec2(uv[2], uv[3]),  # Top right
-            Vec2(uv[0], uv[3]),  # Top left
+            Vec2(uv[0], uv[1]),
+            Vec2(uv[2], uv[1]),
+            Vec2(uv[2], uv[3]),
+            Vec2(uv[0], uv[3]),
         ]
         uvs.extend(new_uvs)
 
-        # Create triangles
         triangles.extend([
             vertex_index, vertex_index + 1, vertex_index + 2,
             vertex_index, vertex_index + 2, vertex_index + 3
         ])
         vertex_index += 4
 
-        # Create combined hover/collision entity that matches floor section exactly
+        # Create hover/collision entity
         entity = Entity(
             model=Mesh(
                 vertices=[Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 1), Vec3(0, 0, 1)],
                 triangles=[0, 1, 2, 0, 2, 3],
                 uvs=[Vec2(0, 0), Vec2(1, 0), Vec2(1, 1), Vec2(0, 1)]
             ),
-            position=scaled_pos,
-            scale=scaled_size,
-            color=color.rgba(1, 1, 1, 0),  # Transparent by default
-            collider='mesh',  # Use mesh collider for precise hovering and collision
+            position=Vec3(*pos) * scale + Vec3(*position),
+            scale=Vec3(*size) * scale,
+            color=color.rgba(1, 1, 1, 0),
+            collider='mesh',
             visible=False
         )
-
         entities.append(entity)
 
-    # Update floor mesh
     floor.model.vertices = vertices
     floor.model.uvs = uvs
     floor.model.triangles = triangles
@@ -212,177 +178,21 @@ def load_terrain(positions, sizes, position, scale, texture_paths):
 
     return floor, entities
 
-def apply_warp(point, warp_pts):
-    """Apply perspective warp to a point based on the warp points, including the z-coordinate."""
-    x, y = point
-
-    # Calculate weights for bilinear interpolation
-    p1, p2, p3, p4 = warp_pts
-    f1 = (1 - x) * (1 - y)
-    f2 = x * (1 - y)
-    f3 = x * y
-    f4 = (1 - x) * y
-
-    # Interpolate the point based on warp points
-    warped_x = f1 * p1[0] + f2 * p2[0] + f3 * p3[0] + f4 * p4[0]
-    warped_y = f1 * p1[1] + f2 * p2[1] + f3 * p3[1] + f4 * p4[1]
-    warped_z = f1 * p1[2] + f2 * p2[2] + f3 * p3[2] + f4 * p4[2]
-
-    return warped_x, warped_y, warped_z
-
-def load_terrain_warp(positions, sizes, position, scale, warp_points=None):
-    """
-    Enhanced terrain loading function with perspective warping.
-    
-    Args:
-        positions (list): List of (x, y, z) positions for each terrain section
-        sizes (list): List of (width, height, depth) sizes for each section
-        position (tuple): Global position offset for the entire terrain
-        scale (float): Global scale factor for the entire terrain
-        warp_points (list, optional): Optional list of 4 points for perspective warping
-    
-    Returns:
-        tuple: (floor Entity, list of hover/collision entities)
-    """
-    # Generate the texture atlas and UV regions
-    texture_atlas, texture_regions = create_texture_atlas()
-    texture_atlas = Texture(texture_atlas)
-
-    # Define terrain sections
-    sections = [
-        {'type': 'room1', 'position': Vec3(*positions[0]), 'size': Vec3(*sizes[0])},
-        {'type': 'hallway', 'position': Vec3(*positions[1]), 'size': Vec3(*sizes[1])},
-        {'type': 'room2', 'position': Vec3(*positions[2]), 'size': Vec3(*sizes[2])},
-    ]
-
-    # Create main floor entity
-    floor = Entity(
-        model=Mesh(),
-        texture=texture_atlas,
-        scale=scale,
-        position=position
-    )
-
-    # Initialize mesh data
-    vertices = []
-    uvs = []
-    triangles = []
-    entities = []
-    vertex_index = 0
-
-    # Prepare warp points if not provided
-    if warp_points is None:
-        warp_points = [
-            (0, 0, 0),  # top-left
-            (1, 0, 0),  # top-right
-            (1, 1, 0),  # bottom-right
-            (0, 1, 0)   # bottom-left
-        ]
-
-    for section in sections:
-        pos = section['position']
-        size = section['size']
-        uv = texture_regions[section['type']]
-
-        # Apply global scale to position and size
-        scaled_pos = pos * scale + Vec3(*position)
-        scaled_size = size * scale
-
-        # Create vertices for this section with warping
-        original_vertices = [
-            Vec3(pos.x, pos.y, pos.z),
-            Vec3(pos.x + size.x, pos.y, pos.z),
-            Vec3(pos.x + size.x, pos.y, pos.z + size.z),
-            Vec3(pos.x, pos.y, pos.z + size.z),
-        ]
-
-        # Warp vertices based on warp points
-        warped_vertices = []
-        for i, vert in enumerate(original_vertices):
-            # Normalize vertex position relative to section
-            norm_x = (vert.x - pos.x) / size.x
-            norm_y = (vert.z - pos.z) / size.z
-
-            # Apply warp
-            warped_x, warped_y, warped_z = apply_warp((norm_x, norm_y), warp_points)
-
-            # Denormalize back to world space
-            warped_vert = Vec3(
-                pos.x + warped_x * size.x,
-                vert.y + warped_z * size.y,  # Apply warping to the y-coordinate as well
-                pos.z + warped_y * size.z
-            )
-            warped_vertices.append(warped_vert)
-
-        vertices.extend(warped_vertices)
-
-        # Create UVs with proper mapping
-        new_uvs = [
-            Vec2(uv[0], uv[1]),  # Bottom left
-            Vec2(uv[2], uv[1]),  # Bottom right
-            Vec2(uv[2], uv[3]),  # Top right
-            Vec2(uv[0], uv[3]),  # Top left
-        ]
-        uvs.extend(new_uvs)
-
-        # Create triangles
-        triangles.extend([
-            vertex_index, vertex_index + 1, vertex_index + 2,
-            vertex_index, vertex_index + 2, vertex_index + 3
-        ])
-        vertex_index += 4
-
-        # Create collision entity with the same warped vertices
-        collision_entity = Entity(
-            model=Mesh(
-                vertices=warped_vertices,
-                triangles=[0, 1, 2, 0, 2, 3],
-                uvs=new_uvs
-            ),
-            position=floor.position,  # Use the same position as floor
-            scale=floor.scale,  # Use the same scale as floor
-            color=color.rgba(1, 1, 1, 0),  # Transparent by default
-            collider='mesh',
-            visible=False  # Set to True for debugging; change to False for production
-        )
-        entities.append(collision_entity)
-
-    # Update floor mesh
-    floor.model.vertices = vertices
-    floor.model.uvs = uvs
-    floor.model.triangles = triangles
-    floor.model.generate()
-
-    return floor, entities
-    
 def load_terrain_warp(positions, sizes, position, scale, texture_paths, warp_points_list=None):
     """
     Enhanced terrain loading function with perspective warping for each section.
-    
-    Args:
-        positions (list): List of (x, y, z) positions for each terrain section
-        sizes (list): List of (width, height, depth) sizes for each section
-        position (tuple): Global position offset for the entire terrain
-        scale (float): Global scale factor for the entire terrain
-        warp_points_list (list, optional): Optional list of warp points for each section
-    
-    Returns:
-        tuple: (floor Entity, list of hover/collision entities)
     """
-    # Generate the texture atlas and UV regions
-    texture_atlas, texture_regions = create_texture_atlas(texture_paths)
-    texture_atlas = Texture(texture_atlas)
+    texture_atlas_img, texture_regions = create_texture_atlas(texture_paths)
+    texture_atlas = Texture(texture_atlas_img)
 
-    # Define terrain sections dynamically based on texture_paths 
-    sections = [] 
-    for i, (section_type, texture_path) in enumerate(texture_paths.items()): 
-        sections.append({ 
-            'type': section_type, 
-            'position': Vec3(*positions[i]), 
+    sections = []
+    for i, (section_type, tex_path) in enumerate(texture_paths.items()):
+        sections.append({
+            'type': section_type,
+            'position': Vec3(*positions[i]),
             'size': Vec3(*sizes[i])
         })
-        
-    # Create main floor entity
+
     floor = Entity(
         model=Mesh(),
         texture=texture_atlas,
@@ -390,29 +200,20 @@ def load_terrain_warp(positions, sizes, position, scale, texture_paths, warp_poi
         position=position
     )
 
-    # Initialize mesh data
     vertices = []
     uvs = []
     triangles = []
     entities = []
     vertex_index = 0
 
-    # Ensure we have warp points for each section
     if warp_points_list is None:
-        warp_points_list = [
-            [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)] for _ in sections
-        ]
+        warp_points_list = [[(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)] for _ in sections]
 
     for section, warp_points in zip(sections, warp_points_list):
         pos = section['position']
         size = section['size']
         uv = texture_regions[section['type']]
 
-        # Apply global scale to position and size
-        scaled_pos = pos * scale + Vec3(*position)
-        scaled_size = size * scale
-
-        # Create vertices for this section with warping
         original_vertices = [
             Vec3(pos.x, pos.y, pos.z),
             Vec3(pos.x + size.x, pos.y, pos.z),
@@ -420,58 +221,48 @@ def load_terrain_warp(positions, sizes, position, scale, texture_paths, warp_poi
             Vec3(pos.x, pos.y, pos.z + size.z),
         ]
 
-        # Warp vertices based on warp points
         warped_vertices = []
-        for i, vert in enumerate(original_vertices):
-            # Normalize vertex position relative to section
+        for vert in original_vertices:
             norm_x = (vert.x - pos.x) / size.x
             norm_y = (vert.z - pos.z) / size.z
-
-            # Apply warp
             warped_x, warped_y, warped_z = apply_warp((norm_x, norm_y), warp_points)
-
-            # Denormalize back to world space
             warped_vert = Vec3(
                 pos.x + warped_x * size.x,
-                vert.y + warped_z * size.y,  # Apply warping to the y-coordinate as well
+                vert.y + warped_z * size.y,
                 pos.z + warped_y * size.z
             )
             warped_vertices.append(warped_vert)
 
         vertices.extend(warped_vertices)
 
-        # Create UVs with proper mapping
         new_uvs = [
-            Vec2(uv[0], uv[1]),  # Bottom left
-            Vec2(uv[2], uv[1]),  # Bottom right
-            Vec2(uv[2], uv[3]),  # Top right
-            Vec2(uv[0], uv[3]),  # Top left
+            Vec2(uv[0], uv[1]),
+            Vec2(uv[2], uv[1]),
+            Vec2(uv[2], uv[3]),
+            Vec2(uv[0], uv[3]),
         ]
         uvs.extend(new_uvs)
 
-        # Create triangles
         triangles.extend([
             vertex_index, vertex_index + 1, vertex_index + 2,
             vertex_index, vertex_index + 2, vertex_index + 3
         ])
         vertex_index += 4
 
-        # Create collision entity with the same warped vertices
         collision_entity = Entity(
             model=Mesh(
                 vertices=warped_vertices,
                 triangles=[0, 1, 2, 0, 2, 3],
                 uvs=new_uvs
             ),
-            position=floor.position,  # Use the same position as floor
-            scale=floor.scale,  # Use the same scale as floor
-            color=color.rgba(1, 1, 1, 0),  # Transparent by default
+            position=floor.position,
+            scale=floor.scale,
+            color=color.rgba(1, 1, 1, 0),
             collider='mesh',
-            visible=False  # Set to True for debugging; change to False for production
+            visible=False
         )
         entities.append(collision_entity)
 
-    # Update floor mesh
     floor.model.vertices = vertices
     floor.model.uvs = uvs
     floor.model.triangles = triangles
@@ -479,224 +270,240 @@ def load_terrain_warp(positions, sizes, position, scale, texture_paths, warp_poi
 
     return floor, entities
 
+def generate_smooth_heightmap(num_sections_x, num_sections_z, noise_scale, max_height, smoothing_passes):
+    """Generate a smooth height map using multiple noise layers."""
+    # Create two noise generators for different detail levels
+    base_noise = PerlinNoise(octaves=4, seed=random.randint(0, 1000))
+    detail_noise = PerlinNoise(octaves=8, seed=random.randint(0, 1000))
+    
+    # Generate initial height map
+    height_map = [[
+        (base_noise([x * noise_scale, z * noise_scale]) * 0.7 +
+         detail_noise([x * noise_scale * 2, z * noise_scale * 2]) * 0.3) * max_height
+        for x in range(num_sections_x + 1)
+    ] for z in range(num_sections_z + 1)]
+    
+    # Apply smoothing
+    def smooth_pass():
+        smoothed = [[0 for _ in range(num_sections_x + 1)] 
+                   for _ in range(num_sections_z + 1)]
+        for z in range(1, num_sections_z):
+            for x in range(1, num_sections_x):
+                smoothed[z][x] = (
+                    height_map[z-1][x] + height_map[z+1][x] +
+                    height_map[z][x-1] + height_map[z][x+1] +
+                    height_map[z][x] * 4
+                ) / 8.0
+        return smoothed
+    
+    # Apply multiple smoothing passes
+    for _ in range(smoothing_passes):
+        height_map = smooth_pass()
+    
+    return height_map
+
+def calculate_slope(heights):
+    """Calculate the slope at a point based on surrounding heights."""
+    max_diff = max(heights) - min(heights)
+    return max_diff
+
 def generate_section_type_map(num_sections_x, num_sections_z, texture_paths, biome_percentages):
-    """
-    Generate a section type map based on Perlin noise, biomes, and given percentages.
-
-    Args:
-        num_sections_x (int): Number of terrain sections along the x-axis.
-        num_sections_z (int): Number of terrain sections along the z-axis.
-        texture_paths (dict): Dictionary of texture paths.
-        biome_percentages (dict): Dictionary mapping each biome type to its percentage.
-
-    Returns:
-        dict: A dictionary mapping section coordinates to biome types.
-    """
+    """Generate biome distribution with proper percentages and transitions."""
     seed = random.randint(0, 1000)
+    noise = PerlinNoise(octaves=4, seed=seed)
     noise_scale = 0.1
     section_type_map = {}
     total_sections = num_sections_x * num_sections_z
 
-    # Calculate the exact number of tiles for each biome based on percentages
-    biome_quotas = {biome: int(total_sections * percentage) for biome, percentage in biome_percentages.items()}
-    
-    # Fill quotas with Perlin noise values
+    # Generate base noise map
     noise_values = []
     for z in range(num_sections_z):
         for x in range(num_sections_x):
-            noise_value = pnoise2((x + seed) * noise_scale, (z + seed) * noise_scale)
+            # Use multiple noise frequencies for more natural transitions
+            noise_value = (
+                noise([x * noise_scale, z * noise_scale]) * 0.6 +
+                noise([x * noise_scale * 2, z * noise_scale * 2]) * 0.4
+            )
             noise_values.append((noise_value, (x, z)))
+
+    # Sort by noise value
+    noise_values.sort(key=lambda x: x[0])
     
-    # Sort the tiles by noise value
-    noise_values.sort(key=lambda nv: nv[0])
+    # Calculate exact number of tiles for each biome
+    biome_counts = {}
+    remaining = total_sections
+    for biome, percentage in biome_percentages.items():
+        count = int(total_sections * percentage)
+        biome_counts[biome] = count
+        remaining -= count
     
-    # Assign biomes based on sorted noise values and quotas
-    index = 0
-    for biome, quota in biome_quotas.items():
-        for _ in range(quota):
-            if index < len(noise_values):
-                _, coord = noise_values[index]
+    # Distribute any remaining tiles
+    while remaining > 0:
+        for biome in biome_counts.keys():
+            if remaining > 0:
+                biome_counts[biome] += 1
+                remaining -= 1
+
+    # Assign biomes based on noise values
+    current_index = 0
+    for biome, count in biome_counts.items():
+        for _ in range(count):
+            if current_index < len(noise_values):
+                _, coord = noise_values[current_index]
                 section_type_map[coord] = biome
-                index += 1
+                current_index += 1
 
-    # In case there are any remaining tiles not assigned due to rounding,
-    # assign the remaining biomes in a fair way
-    remaining_biomes = list(biome_quotas.keys())
-    while index < len(noise_values):
-        _, coord = noise_values[index]
-        biome = remaining_biomes[index % len(remaining_biomes)]
-        section_type_map[coord] = biome
-        index += 1
+    # Smooth transitions between biomes
+    smoothed_map = section_type_map.copy()
+    for z in range(1, num_sections_z - 1):
+        for x in range(1, num_sections_x - 1):
+            # Count neighboring biomes
+            neighbors = [
+                section_type_map.get((x+dx, z+dz))
+                for dx, dz in [(-1,0), (1,0), (0,-1), (0,1)]
+            ]
+            # If surrounded by different biome, consider changing
+            most_common = max(set(neighbors), key=neighbors.count)
+            if neighbors.count(most_common) >= 3:  # If 3 or more neighbors are the same
+                smoothed_map[(x, z)] = most_common
 
-    return section_type_map
+    return smoothed_map
 
-def generate_and_load_terrain(self, num_sections_x, num_sections_z, biome_percentages, tile_size=(4, 1, 4), position=(0, 0, 0), 
-                              scale=1.0, texture_paths=None, max_height=10, towns=3, gold_mine_chance=0.02, minimap_path="./output/terrain_visualization.png", debug=True):
+def apply_warp(point, warp_pts):
+    """Apply perspective warp to a point."""
+    x, y = point
+    p1, p2, p3, p4 = warp_pts
+    
+    # Bilinear interpolation weights
+    f1 = (1 - x) * (1 - y)
+    f2 = x * (1 - y)
+    f3 = x * y
+    f4 = (1 - x) * y
+    
+    # Calculate warped coordinates
+    warped_x = f1 * p1[0] + f2 * p2[0] + f3 * p3[0] + f4 * p4[0]
+    warped_y = f1 * p1[1] + f2 * p2[1] + f3 * p3[1] + f4 * p4[1]
+    warped_z = f1 * p1[2] + f2 * p2[2] + f3 * p3[2] + f4 * p4[2]
+    
+    return warped_x, warped_y, warped_z
+
+def generate_and_load_terrain(self, num_sections_x, num_sections_z, biome_percentages, tile_size=(4, 1, 4),
+                            position=(0, 0, 0), scale=1.0, texture_paths=None, max_height=10, towns=3,
+                            gold_mine_chance=0.02, minimap_path="./output/terrain_visualization.png", debug=True):
     """
-    Generate terrain positions, sizes, and a floor with hover/collision entities, including towns, gold mines, and roads.
-
-    Args:
-        num_sections_x (int): Number of terrain sections along the x-axis.
-        num_sections_z (int): Number of terrain sections along the z-axis.
-        biome_percentages (dict): Percentage of biomes for each section type.
-        tile_size (tuple): Size of each tile (width, height, depth).
-        position (tuple): Position offset for the entire terrain.
-        scale (float): Global scale factor for the terrain.
-        texture_paths (dict): Dictionary of texture paths mapped to section types.
-        max_height (float): Maximum height variation.
-        towns (int): Number of towns.
-        gold_mine_chance (float): Chance of a gold mine spawning.
-        debug (bool): If True, generates debug outputs (e.g., logs and graphs).
-
-    Returns:
-        tuple: (floor Entity, list of hover/collision entities, positions)
+    Generate and load terrain with improved height mapping and cactus placement.
     """
+    # Load terrain configuration
+    config = load_terrain_config()
+    
+    # Store terrain boundaries for minimap
     self.terrain_start_x = position[0]
     self.terrain_start_z = position[2]
 
-    noise = PerlinNoise(octaves=4, seed=random.randint(0, 1000))
-    if isinstance(tile_size, int):
-        tile_size = (tile_size, 1, tile_size)
+    # Apply configuration values
+    scale = config["scale"] if isinstance(scale, (int, float)) else scale
+    max_height = config["max_height"]
+    noise_scale = config["noise_scale"]
+    smoothing_passes = config["smoothing_passes"]
+    cactus_density = config["cactus_density"]
+    cactus_scale = config["cactus_scale"]
 
-    if isinstance(scale, (int, float)):
-        scale = Vec3(scale, scale, scale)
+    # Generate smooth height map
+    height_map = generate_smooth_heightmap(
+        num_sections_x, num_sections_z,
+        noise_scale, max_height,
+        smoothing_passes
+    )
 
-    # Prepare output directories for debugging
-    if debug:
-        os.makedirs("./output", exist_ok=True)
-        cactus_log_path = "./output/cactus_log.txt"
+    # Generate biome distribution
+    section_type_map = generate_section_type_map(
+        num_sections_x, num_sections_z,
+        texture_paths, config["biome_percentages"]
+    )
 
-    # Generate section type map
-    section_type_map = generate_section_type_map(num_sections_x, num_sections_z, texture_paths, biome_percentages)
+    # Create texture atlas
+    texture_atlas_img, texture_regions = create_texture_atlas(texture_paths)
+    texture_atlas = Texture(texture_atlas_img)
 
-    # Generate height map
-    height_map = [[
-        noise([x * scale.x, z * scale.z]) * max_height for x in range(num_sections_x + 1)
-    ] for z in range(num_sections_z + 1)]
-
-    # Function to smooth heights around a plateau
-    def smooth_heights(x, z, plateau_height, radius=2):
-        for dz in range(-radius, radius + 1):
-            for dx in range(-radius, radius + 1):
-                nx, nz = x + dx, z + dz
-                if 0 <= nx < num_sections_x + 1 and 0 <= nz < num_sections_z + 1:
-                    distance = max(abs(dx), abs(dz))
-                    blend_factor = max(0, 1 - distance / (radius + 1))
-                    height_map[nz][nx] = (
-                        blend_factor * plateau_height +
-                        (1 - blend_factor) * height_map[nz][nx]
-                    )
-
-    # Place towns
-    town_positions = []
-    for _ in range(towns):
-        while True:
-            town_x = random.randint(0, num_sections_x - 5)
-            town_z = random.randint(0, num_sections_z - 5)
-            if all(abs(town_x - tx) >= 5 and abs(town_z - tz) >= 5 for tx, tz in town_positions):
-                break
-        town_positions.append((town_x, town_z))
-        plateau_height = max(
-            height_map[z][x] for z in range(town_z, town_z + 5) for x in range(town_x, town_x + 5)
-        )
-        for z in range(town_z, town_z + 5):
-            for x in range(town_x, town_x + 5):
-                height_map[z][x] = plateau_height
-                section_type_map[(x, z)] = 'pavement2'
-        smooth_heights(town_x + 2, town_z + 2, plateau_height, radius=3)
-
-    # Place gold mines
-    gold_mine_positions = []
-    for z in range(num_sections_z):
-        for x in range(num_sections_x):
-            if random.random() < gold_mine_chance:
-                gold_mine_positions.append((x, z))
-                plateau_height = height_map[z][x]
-                height_map[z][x] = plateau_height
-                section_type_map[(x, z)] = 'pavement2'
-                smooth_heights(x, z, plateau_height, radius=2)
-
-    # Create roads connecting towns and gold mines
-    def add_road(x1, z1, x2, z2):
-        for x in range(min(x1, x2), max(x1, x2) + 1):
-            section_type_map[(x, z1)] = 'pavement'
-        for z in range(min(z1, z2), max(z1, z2) + 1):
-            section_type_map[(x2, z)] = 'pavement'
-        smooth_heights(x1, z1, height_map[z1][x1], radius=2)
-
-    for i in range(len(town_positions) - 1):
-        x1, z1 = town_positions[i]
-        x2, z2 = town_positions[i + 1]
-        add_road(x1 + 2, z1 + 2, x2 + 2, z2 + 2)
-
-    for gx, gz in gold_mine_positions:
-        nearest_town = min(town_positions, key=lambda t: abs(t[0] - gx) + abs(t[1] - gz))
-        add_road(gx, gz, nearest_town[0] + 2, nearest_town[1] + 2)
-
-    # Prepare entity lists
-    positions = []
+    # Initialize storage lists
+    positions_list = []
     hover_entities = []
     cacti_positions = []
 
-    # Default texture path
-    if texture_paths is None:
-        texture_paths = {'default': './assets/map/Pablo_img.jpg'}
-
-    # Create texture atlas
-    texture_atlas, texture_regions = create_texture_atlas(texture_paths)
-    texture_atlas = Texture(texture_atlas)
-
     # Create floor entity
+    #floor = Entity(
+    #    model=Mesh(),
+    #    texture=texture_atlas,
+    #    scale=scale,
+    #    position=Vec3(*position)
+    #)
+    
     floor = Entity(
         model=Mesh(),
         texture=texture_atlas,
-        scale=scale,
-        position=Vec3(*position)
+        scale=(1,1,1), # Set scale to (1,1,1) to avoid double transformation
+        position=(0,0,0) # Set position to (0,0,0) to avoid double transformation
     )
 
+    # Initialize mesh data
     vertices = []
     uvs = []
     triangles = []
     vertex_index = 0
 
+    # Process each terrain section
     for z in range(num_sections_z):
         for x in range(num_sections_x):
-            pos_x = x * tile_size[0] * scale.x + position[0]
-            pos_z = z * tile_size[2] * scale.z + position[2]
+            # Calculate base position
+            pos_x = x * tile_size[0] * scale + position[0]
+            pos_z = z * tile_size[2] * scale + position[2]
+            
+            # Get corner heights
             vert_heights = [
                 height_map[z][x],
                 height_map[z][x + 1],
                 height_map[z + 1][x + 1],
                 height_map[z + 1][x]
             ]
-            pos_y = sum(vert_heights) / 4
-            positions.append((pos_x, pos_y, pos_z))
+            
+            # Calculate center height for tile
+            center_height = sum(vert_heights) / 4
+            pos_y = center_height * scale
 
+            # Store position
+            positions_list.append((pos_x, pos_y, pos_z))
+
+            # Create vertices with proper height interpolation
             warped_vertices = [
-                Vec3(pos_x, vert_heights[0] * scale.y, pos_z),
-                Vec3(pos_x + tile_size[0] * scale.x, vert_heights[1] * scale.y, pos_z),
-                Vec3(pos_x + tile_size[0] * scale.x, vert_heights[2] * scale.y, pos_z + tile_size[2] * scale.z),
-                Vec3(pos_x, vert_heights[3] * scale.y, pos_z + tile_size[2] * scale.z),
+                Vec3(pos_x, vert_heights[0] * scale, pos_z),
+                Vec3(pos_x + tile_size[0] * scale, vert_heights[1] * scale, pos_z),
+                Vec3(pos_x + tile_size[0] * scale, vert_heights[2] * scale, pos_z + tile_size[2] * scale),
+                Vec3(pos_x, vert_heights[3] * scale, pos_z + tile_size[2] * scale),
             ]
-
             vertices.extend(warped_vertices)
 
-            # Texture mapping
-            uv = texture_regions[section_type_map.get((x, z), 'default')]
+            # Get correct texture region based on biome
+            biome_type = section_type_map.get((x, z), 'default')
+            uv = texture_regions.get(biome_type, (0,0,1,1))
+            
+            # Create UVs
             new_uvs = [
                 Vec2(uv[0], uv[1]),
                 Vec2(uv[2], uv[1]),
                 Vec2(uv[2], uv[3]),
                 Vec2(uv[0], uv[3]),
             ]
+
             uvs.extend(new_uvs)
+
+            # Create triangles
             triangles.extend([
                 vertex_index, vertex_index + 1, vertex_index + 2,
                 vertex_index, vertex_index + 2, vertex_index + 3
             ])
             vertex_index += 4
 
-            # Hover entity
+            # Create collision entity
             hover_entity = Entity(
                 model=Mesh(
                     vertices=warped_vertices,
@@ -705,51 +512,71 @@ def generate_and_load_terrain(self, num_sections_x, num_sections_z, biome_percen
                 ),
                 position=floor.position,
                 scale=floor.scale,
-                color=color.rgba(1, 1, 1, 0),
+                color=ursina.color.rgba(1, 1, 1, 0),
                 collider='mesh',
                 visible=False
             )
             hover_entities.append(hover_entity)
 
-            pos_x = x * tile_size[0] * scale.x + position[0]
-            pos_z = z * tile_size[2] * scale.z + position[2]
-
-            # Cactus placement (only on desert tiles)
-            if section_type_map.get((x, z)) == 'Pablo_img' and random.random() < 0.3:
-                center_x = pos_x + (tile_size[0] * scale.x / 2)
-                center_z = pos_z + (tile_size[2] * scale.z / 2)
+            # Handle cactus placement
+            if biome_type == 'Pablo_img':  # Only place on desert tiles
+                # Calculate exact ground height using bilinear interpolation
+                x_local = (pos_x - position[0]) / (tile_size[0] * scale)
+                z_local = (pos_z - position[2]) / (tile_size[2] * scale)
                 
-                # Compute height at the center using bilinear interpolation
-                def bilinear_interpolate(heights, x_ratio, z_ratio):
-                    bottom_edge = heights[0] * (1 - x_ratio) + heights[1] * x_ratio
-                    top_edge = heights[3] * (1 - x_ratio) + heights[2] * x_ratio
-                    return bottom_edge * (1 - z_ratio) + top_edge * z_ratio
-
-                # Clamp and smooth heights
-                smoothed_heights = [
-                    max(min(h, max_height * scale.y), -max_height * scale.y) for h in vert_heights
-                ]
-                center_y = bilinear_interpolate(smoothed_heights, 0.5, 0.5)
-
-                cacti_positions.append((center_x, center_y, center_z))
+                # Get the exact tile coordinates
+                tile_x = int(x_local)
+                tile_z = int(z_local)
                 
-                # Debug logging
-                if debug:
-                    with open(cactus_log_path, "a") as cactus_log_file:
-                        cactus_log_file.write(f"Cactus: Tile ({x}, {z}), Pos ({center_x:.2f}, {center_y:.2f}, {center_z:.2f})\n")
+                # Only proceed if we're actually in a desert tile
+                if section_type_map.get((tile_x, tile_z)) == 'Pablo_img':
+                    # Calculate slope
+                    max_height_diff = max(vert_heights) - min(vert_heights)
+                    if max_height_diff < 0.5:  # Only place on relatively flat ground
+                        # Calculate center position with proper height
+                        center_x = pos_x + (tile_size[0] * scale / 2)
+                        center_z = pos_z + (tile_size[2] * scale / 2)
+                        
+                        # Add small random offset to prevent grid pattern
+                        offset_x = random.uniform(-0.2, 0.2) * tile_size[0] * scale
+                        offset_z = random.uniform(-0.2, 0.2) * tile_size[2] * scale
+                        
+                        final_x = center_x + offset_x
+                        final_z = center_z + offset_z
+                        
+                        # Calculate normalized coordinates of final_x, final_z within the current tile
+                        norm_x_in_tile = (final_x - pos_x) / (tile_size[0] * scale)
+                        norm_z_in_tile = (final_z - pos_z) / (tile_size[2] * scale)
 
-                # Load cacus model
-                cactus_entity = Entity(
-                    model=load_model('assets/map/Tall_cactus_no_flo_obj/0dddc35f4b62_Tall_cactus__no_flo.obj'),
-                    texture=load_texture('assets/map/Tall_cactus_no_flo_obj/0dddc35f4b62_Tall_cactus__no_flo_texture_kd.jpg'),
-                    position=Vec3(center_x, center_y, center_z),
-                    scale=Vec3(
-                        random.uniform(0.8, 1.5),
-                        random.uniform(0.8, 1.5),
-                        random.uniform(0.8, 1.5)
-                    ),
-                    rotation_y=random.uniform(0, 360)
-                )              
+                        # Bilinearly interpolate the height at (final_x, final_z)
+                        h00 = vert_heights[0] # (x,z)
+                        h10 = vert_heights[1] # (x+1,z)
+                        h11 = vert_heights[2] # (x+1,z+1)
+                        h01 = vert_heights[3] # (x,z+1)
+
+                        interpolated_height = (
+                            h00 * (1 - norm_x_in_tile) * (1 - norm_z_in_tile) +
+                            h10 * norm_x_in_tile * (1 - norm_z_in_tile) +
+                            h01 * (1 - norm_x_in_tile) * norm_z_in_tile +
+                            h11 * norm_x_in_tile * norm_z_in_tile
+                        )
+                        
+                        # Use the interpolated height, scaled
+                        cactus_y = interpolated_height * scale
+
+                        # Place cactus exactly on the ground
+                        cactus_entity = Entity(
+                            model=load_model('assets/map/Tall_cactus_no_flo_obj/0dddc35f4b62_Tall_cactus__no_flo.obj'),
+                            texture=load_texture('assets/map/Tall_cactus_no_flo_obj/0dddc35f4b62_Tall_cactus__no_flo_texture_kd.jpg'),
+                            position=Vec3(final_x, cactus_y, final_z),
+                            scale=Vec3(1.0, 1.0, 1.0),
+                            rotation_y=random.uniform(0, 360)
+                        )
+                        cacti_positions.append((final_x, cactus_y, final_z)) # Add cactus position to list
+                        
+                        if debug:
+                            with open("./output/cactus_log.txt", "a") as f:
+                                f.write(f"Cactus: Biome '{biome_type}', Tile ({tile_x}, {tile_z}), Pos ({final_x:.2f}, {cactus_y:.2f}, {final_z:.2f})\n")
 
     # Update floor mesh
     floor.model.vertices = vertices
@@ -757,126 +584,69 @@ def generate_and_load_terrain(self, num_sections_x, num_sections_z, biome_percen
     floor.model.triangles = triangles
     floor.model.generate()
 
-    # Optional debug visualization
-    if debug:
-        plt.figure(figsize=(12, 10))
-        ax = plt.gca()
-        
-        # Plot tiles with biome coloring
-        for z in range(num_sections_z):
-            for x in range(num_sections_x):
-                biome = section_type_map.get((x, z), "default")
-                color_new = "yellow" if biome == "Pablo_img" else "green"
-                ax.add_patch(plt.Rectangle((x, z), 1, 1, color=color_new, edgecolor="black", alpha=0.7))
-        
-        # Add cactus markers
-        if cacti_positions:
-            cactus_x = [cx / tile_size[0] / scale.x for cx, _, _ in cacti_positions]
-            cactus_z = [cz / tile_size[2] / scale.z for _, _, cz in cacti_positions]
-            plt.scatter(cactus_x, cactus_z, color='red', marker='^', label='Cactus', s=100)
-        
-        # Create color patches for legend
-        from matplotlib.patches import Patch
-        handles = [
-            Patch(color='yellow', label='Pablo_img'),
-            Patch(color='green', label='Other Biome'),
-            plt.Line2D([], [], color='red', marker='^', linestyle='None', markersize=10, label='Cactus')
-        ]
-        
-        plt.legend(handles=handles, loc="upper right")
-        
-        # Add title, labels, and grid
-        plt.title("Tile Biomes and Cactus Placement")
-        plt.xlabel("X-axis (Tiles)")
-        plt.ylabel("Z-axis (Tiles)")
-        plt.grid(True, which="both", linestyle="--", linewidth=0.5)
-        
-        # Ensure x and y axis have same scale
-        plt.axis('equal')
-        
-        # Adjust plot to ensure all elements are visible
-        plt.tight_layout()
-        
-        # Ensure output directory exists
-        os.makedirs("./output", exist_ok=True)
-        
-        # Save the visualization
-        plt.savefig(minimap_path, dpi=300)
-        print(f"Visualization saved to {minimap_path}")
-        plt.close()
-        
-        # Create a simple map visualization without axis, labels, and grid
-        fig, ax = plt.subplots(figsize=(12, 10))
-        
-        # Plot tiles with biome coloring
-        for z in range(num_sections_z):
-            for x in range(num_sections_x):
-                biome = section_type_map.get((x, z), "default")
-                color_new = "yellow" if biome == "Pablo_img" else "green"
-                ax.add_patch(plt.Rectangle((x, z), 1, 1, color=color_new, edgecolor="black", alpha=0.7))
-        
-        # Add cactus markers
-        if cacti_positions:
-            cactus_x = [cx / tile_size[0] / scale.x for cx, _, _ in cacti_positions]
-            cactus_z = [cz / tile_size[2] / scale.z for _, _, cz in cacti_positions]
-            plt.scatter(cactus_x, cactus_z, color='red', marker='^', label='Cactus', s=100)
-        
-        # Remove axis
-        ax.axis('off')
-        ax.set_xticks([]) 
-        ax.set_yticks([])
-        
-        # Remove any extra margins 
-        ax.margins(0) 
-        
-        # Set the limits of the axis to match the plot area (this can be used to zoom in later)
-        #ax.set_xlim(0, 10) 
-        #ax.set_ylim(0, 10)
-        
-        # Adjust plot to ensure all elements are visible
-        plt.tight_layout()
-        
-        # Adjust plot margins 
-        fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    # Always create minimap and dot, regardless of debug status
+    # Create a figure with no padding
+    fig = plt.figure(figsize=(num_sections_x, num_sections_z), dpi=1) # Set figure size to match grid dimensions, dpi=1 for exact pixel control
+    ax = fig.add_axes([0, 0, 1, 1]) # Make the axes take up the entire figure area
+    
+    # Define biome colors
+    biome_colors = {
+        'Pablo_img': 'yellow',
+        'grass': 'green',
+        'pavement': 'gray',
+        'pavement2': 'lightgray'
+    }
+    
+    # Plot biome distribution
+    for z in range(num_sections_z):
+        for x in range(num_sections_x):
+            biome = section_type_map.get((x, z), 'grass')  # Default to grass if undefined
+            color = biome_colors.get(biome, 'white')  # Default to white if biome not in colors
+            ax.add_patch(plt.Rectangle(
+                (x, z), 1, 1,
+                color=color,
+                edgecolor='black',
+                alpha=0.7
+            ))
+    
+    # Plot cactus positions if any exist
+    if cacti_positions:
+        # Correctly normalize cactus world positions to plot coordinates
+        cactus_plot_x = [(cx - position[0]) / (tile_size[0] * scale) for cx, _, _ in cacti_positions]
+        cactus_plot_z = [(cz - position[2]) / (tile_size[2] * scale) for _, _, cz in cacti_positions]
+        ax.scatter(cactus_plot_x, cactus_plot_z, color='red', marker='^', label='Cactus', s=50)
+    
+    # Set plot properties
+    ax.set_xlim(0, num_sections_x) # Explicitly set x-limits
+    ax.set_ylim(0, num_sections_z) # Explicitly set y-limits
+    ax.set_aspect('equal') # Ensure aspect ratio is equal
+    ax.axis('off') # Turn off axes and labels to remove any remaining whitespace/borders
+    
+    # Save visualization to a buffer with no padding
+    buf = BytesIO()
+    fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
+    buf.seek(0)
+    plt.close(fig) # Close the figure to free memory
+    
+    # Convert buffer to PIL Image and then to Ursina texture
+    pil_image = Image.open(buf).convert('RGBA')
+    minimap_texture = Texture(pil_image)
+    
+    # Create minimap and dot entities
+    self.minimap = Entity(
+        parent=camera.ui,
+        model='quad',
+        texture=minimap_texture,
+        scale=(0.4, 0.4),
+        position=(0.3, 0.3)
+    )
+    
+    self.dot = Entity(
+        parent=self.minimap,
+        model='quad',
+        color=ursina.color.white,
+        scale=(0.02, 0.02),
+        position=(-0.5, -0.5)
+    )
 
-        # Save plot to a buffer
-        buf = BytesIO()
-        plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
-        buf.seek(0)
-        plt.close()
-        
-        # Create mmap from buffer size
-        buf_size = len(buf.getvalue())
-        frame_minimap_mm = mmap.mmap(-1, buf_size, access=mmap.ACCESS_WRITE)
-        frame_minimap_mm.write(buf.getvalue())
-        frame_minimap_mm.seek(0)
-
-        # Convert mmap to PIL Image
-        pil_image = Image.open(frame_minimap_mm)
-        pil_image = pil_image.convert('RGBA')
-
-        # Convert PIL Image to texture data compatible with Ursina
-        minimap_texture = Texture(pil_image)
-
-        # Create the minimap entity 
-        self.minimap = Entity( 
-            parent=camera.ui, 
-            model='cube', 
-            texture=minimap_texture, 
-            scale=(0.4, 0.4), # Adjust the scale as needed 
-            position=(0.3, 0.3) # Adjust the position to place it in the upper right corner 
-        )
-        
-        # Create the dot entity 
-        self.dot = Entity( 
-            parent=self.minimap, # Parent it to the minimap so it moves with it 
-            model='quad', # Use 'quad' for a simple 2D plane 
-            color=color.white, 
-            scale=(0.02, 0.02), # Adjust scale to make it a dot 
-            position=(-0.5, -0.5) # Initial position 
-        )
-        
-        # Clean up mmap
-        frame_minimap_mm.close()
-
-    return floor, hover_entities, positions
+    return floor, hover_entities, positions_list

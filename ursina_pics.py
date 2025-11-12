@@ -1,3 +1,4 @@
+# File: ursina_pics.py
 import json
 import mmap
 import numpy as np
@@ -66,6 +67,7 @@ class CustomController(Entity):
         
         self.num_sections = len(self.texture_paths.keys())
 
+        '''
         # Parameters
         self.num_sections_x = 30
         self.num_sections_z = 30
@@ -85,6 +87,31 @@ class CustomController(Entity):
             tile_size=self.tile_size,
             position=position,
             scale=scale,
+            texture_paths=texture_paths,
+            max_height=max_height,
+            biome_percentages=self.biome_percentages
+        )
+        '''
+        
+        # Parameters
+        self.num_sections_x = 30
+        self.num_sections_z = 30
+        self.tile_size = (4, 1, 4)
+        self.terrain_initial_position = Vec3(0, 0, 0) # Store as an attribute
+        self.terrain_initial_scale = 0.9 # Store as an attribute
+        max_height = 5
+        texture_paths = self.texture_paths
+
+        self.generate_and_load_terrain = generate_and_load_terrain
+
+        # Generate and load terrain
+        self.ground, self.ground_entities, self.positions = self.generate_and_load_terrain(
+            self=self,
+            num_sections_x=self.num_sections_x,
+            num_sections_z=self.num_sections_z,
+            tile_size=self.tile_size,
+            position=self.terrain_initial_position, # Use the stored attribute
+            scale=self.terrain_initial_scale,       # Use the stored attribute
             texture_paths=texture_paths,
             max_height=max_height,
             biome_percentages=self.biome_percentages
@@ -300,19 +327,19 @@ class CustomController(Entity):
             self.key_states = new_key_states
 
         # Handle edit mode toggle
-        if self.key_states.get('e', False) and ((current_time - self.last_toggle_time_e) > self.toggle_delay_e):
+        if self.key_states.get('i', False) and ((current_time - self.last_toggle_time_e) > self.toggle_delay_e):
             self.last_toggle_time_e = current_time
             self.toggle_edit_mode()
 
         # Handle movement
         direction = Vec3(0, 0, 0)
-        if self.key_states.get('w'):
+        if self.key_states.get('e'):
             direction += self.skull_entity.forward
-        if self.key_states.get('s'):
-            direction -= self.skull_entity.forward
-        if self.key_states.get('a'):
-            direction -= self.skull_entity.right
         if self.key_states.get('d'):
+            direction -= self.skull_entity.forward
+        if self.key_states.get('s'):
+            direction -= self.skull_entity.right
+        if self.key_states.get('f'):
             direction += self.skull_entity.right
 
         self.skull_entity.position += direction * self.speed * time.dt
@@ -656,20 +683,26 @@ class CustomController(Entity):
                     self.key_states[key] = False
 
     def update_minimap(self):
-        # Calculate terrain dimensions using Vec3 components
-        terrain_width = self.num_sections_x * self.tile_size[0] * self.scale.x
-        terrain_height = self.num_sections_z * self.tile_size[2] * self.scale.z
+        # Calculate skull's position in terms of grid coordinates
+        # These can be outside the [0, num_sections-1] range if the skull goes off-terrain
+        grid_x = (self.skull_entity.position.x - self.terrain_initial_position.x) / (self.tile_size[0] * self.terrain_initial_scale)
+        grid_z = (self.skull_entity.position.z - self.terrain_initial_position.z) / (self.tile_size[2] * self.terrain_initial_scale)
 
-        # Normalize skull position to the range [0, 1]
-        normalized_x = (self.skull_entity.position.x - self.terrain_start_x) / terrain_width
-        normalized_z = (self.skull_entity.position.z - self.terrain_start_z) / terrain_height
+        # Calculate normalized position, centering the dot within the tile representation
+        # Add 0.5 to grid_x and grid_z to get the center of the current tile
+        # Then divide by the total number of sections to get a normalized value from 0 to 1
+        normalized_x_centered = (grid_x + 0.5) / self.num_sections_x
+        normalized_z_centered = (grid_z + 0.5) / self.num_sections_z
 
-        # Scale normalized position to minimap dimensions and center
-        minimap_width = self.minimap.scale[0] * 2
-        minimap_height = self.minimap.scale[1] * 2
+        # Clamp the normalized position to ensure the dot stays within the minimap's logical bounds [0, 1]
+        normalized_grid_x = clamp(normalized_x_centered, 0, 1)
+        normalized_grid_z = clamp(normalized_z_centered, 0, 1)
 
-        dot_pos_x = (normalized_x - 0.5) * minimap_width
-        dot_pos_y = (normalized_z - 0.5) * minimap_height
+        # The dot's position is relative to its parent (self.minimap),
+        # where the parent's local coordinates range from -0.5 to 0.5.
+        # So, map normalized_grid_x/z (0 to 1) to (-0.5 to 0.5).
+        dot_pos_x = (normalized_grid_x - 0.5)
+        dot_pos_y = (normalized_grid_z - 0.5)
 
         # Update the dot's position on the minimap
         self.dot.position = Vec2(dot_pos_x, dot_pos_y)

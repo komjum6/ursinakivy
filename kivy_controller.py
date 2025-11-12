@@ -95,8 +95,8 @@ class KivyUrsinaApp(App):
             if key_name == 'm':
                 print("m")
                 
-            # Toggle the editor on 'e' press
-            if key_name == 'e':
+            # Toggle the editor on 'i' press
+            if key_name == 'i':
                 self.update_keymap()
                 self.show_popup("Toggling Editor Mode")
 
